@@ -272,9 +272,31 @@ class _MockEngine:
 
         # break-even: probability where payoff crosses zero
         if option_type == "call":
-            break_even = _clamp01(k + prem)
+            be_raw = k + prem
         else:
-            break_even = _clamp01(k - prem)
+            be_raw = k - prem
+        break_even = _clamp01(be_raw)
+
+        # max gain / max loss: side-signed payoff extrema over [0, 1].
+        # The payoff curve already carries the side sign, so its max/min are the
+        # scalars the UI wants (for a long option max loss is -premium, bounded).
+        payoffs = [pt["payoff"] for pt in payoff_curve]
+        max_gain = max(payoffs)
+        max_loss = min(payoffs)
+
+        # model-based probability of profit: settlement x ~ Normal(p, vol) under
+        # this mock's own Bachelier dispersion; profit is the mass on the
+        # profitable side of break-even. Long call / short put profit above
+        # break-even; long put / short call profit below it.
+        settle_vol = max(_SIGMA * math.sqrt(_TAU), 1e-9)
+        if be_raw < 0.0 or be_raw > 1.0:
+            # premium unrecoverable within [0, 1]: long never profits, short always does
+            prob_of_profit = 0.0 if side == "long" else 1.0
+        else:
+            cdf_below = _norm_cdf((be_raw - p) / settle_vol)
+            long_profits_above = option_type == "call"
+            profits_above = long_profits_above if side == "long" else not long_profits_above
+            prob_of_profit = (1.0 - cdf_below) if profits_above else cdf_below
 
         # Greeks via the smooth Bachelier model, evaluated at current p
         vol = _SIGMA * math.sqrt(_TAU)
@@ -311,6 +333,9 @@ class _MockEngine:
             "premium": round(prem, 5),
             "break_even": round(break_even, 4),
             "implied_prob": round(k, 4),
+            "prob_of_profit": round(prob_of_profit, 5),
+            "max_gain": round(max_gain, 5),
+            "max_loss": round(max_loss, 5),
             "payoff_curve": payoff_curve,
             "greeks": {
                 "delta": round(sign * delta, 5),
@@ -530,6 +555,11 @@ class _RealEngine:
             "premium": round(result["fair_price"], 5),
             "break_even": round(break_even, 4),
             "implied_prob": round(result["implied_probability"], 4),
+            # Model-based probability the position ends in profit, in [0, 1].
+            "prob_of_profit": round(result["prob_of_profit"], 5),
+            # Side-signed payoff extrema over [0, 1], in $ per $1 contract.
+            "max_gain": round(result["max_profit"], 5),
+            "max_loss": round(result["max_loss"], 5),
             "payoff_curve": payoff_curve,
             "greeks": {
                 "delta": round(sign * g["delta"], 5),

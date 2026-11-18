@@ -207,6 +207,57 @@ def max_profit_loss(strike: float, option_type, side, premium: float):
     return {"max_profit": max(nets), "max_loss": min(nets)}
 
 
+def prob_of_profit(
+    p: float,
+    strike: float,
+    option_type,
+    side,
+    premium: float,
+    sigma: float = 0.15,
+    tau: float = 1.0,
+    book: Optional[OrderBook] = None,
+) -> float:
+    """Model-based probability the position ends in profit, in [0, 1].
+
+    Under the pricing model the settlement value is
+    ``x ~ Normal(p, sigma_eff)`` with ``sigma_eff = effective_sigma * sqrt(tau)``
+    (the same dispersion the Greeks use). The position is profitable on exactly
+    one side of its break-even (payoff is piecewise linear and monotonic on each
+    side of the strike), so ``PoP`` is the normal probability mass on that side.
+
+    This is a *model-based* figure, not a frequency: it inherits the Bachelier
+    assumptions in MODEL.md, including a little mass outside [0, 1].
+    """
+    p = _check_prob("p", p)
+    strike = _check_prob("strike", strike)
+    ot = _coerce_option_type(option_type)
+    sd = _coerce_side(side)
+    if premium < 0.0:
+        raise ValueError("premium must be >= 0")
+    if tau <= 0.0 or tau > 1.0:
+        raise ValueError("tau must be in (0, 1]")
+
+    sig = max(_effective_sigma(sigma, p, book) * math.sqrt(tau), _SIGMA_FLOOR)
+
+    be = break_even(strike, ot, premium)
+    if not be:
+        # Break-even lies outside [0, 1]: a long position can never recover the
+        # premium within the settlement range, so it is never in profit; the
+        # short counterparty always keeps the premium.
+        return 0.0 if sd is Side.LONG else 1.0
+
+    threshold = be[0]
+    # P(x <= threshold) under Normal(p, sig).
+    cdf_below = _norm_cdf((threshold - p) / sig)
+
+    # Long call / short put profit when x is ABOVE break-even; long put /
+    # short call profit when x is BELOW it. (Short flips the long region.)
+    long_profits_above = ot is OptionType.CALL
+    profits_above = long_profits_above if sd is Side.LONG else not long_profits_above
+
+    return (1.0 - cdf_below) if profits_above else cdf_below
+
+
 # ---------------------------------------------------------------------------
 # Order-book derived quantities
 # ---------------------------------------------------------------------------
@@ -409,6 +460,9 @@ def analyze(
     be = break_even(strike, ot, price)
     mpl = max_profit_loss(strike, ot, sd, price)
     point_greeks = greeks(p, strike, ot, sigma=sigma, tau=tau, book=book)
+    pop = prob_of_profit(
+        p, strike, ot, sd, price, sigma=sigma, tau=tau, book=book
+    )
 
     return {
         "inputs": {
@@ -425,6 +479,7 @@ def analyze(
         "break_even": be,
         "max_profit": mpl["max_profit"],
         "max_loss": mpl["max_loss"],
+        "prob_of_profit": pop,
         "payoff_curve": pcurve,
         "greek_curve": gcurve,
         "greeks": point_greeks,
