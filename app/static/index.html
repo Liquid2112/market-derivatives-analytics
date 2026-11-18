@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Market Derivatives Analytics</title>
+  <meta name="description" content="Read-only analytics for prediction markets: order books, synthetic options, payoff and Greeks. Not trading, not financial advice." />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+  <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">◧</span>
+      <div>
+        <h1>Market Derivatives Analytics</h1>
+        <p class="tagline">Prediction-market order books, synthetic options, payoff &amp; Greeks</p>
+      </div>
+    </div>
+    <div class="status-chip" id="backendChip" title="Data source">—</div>
+  </header>
+
+  <div class="disclaimer" role="note">
+    <strong>Analytics and modeling only.</strong> This tool does not place trades,
+    does not connect to any brokerage, and is <strong>not financial advice</strong>.
+    Every synthetic position shown is a hypothetical model.
+  </div>
+
+  <main class="layout">
+    <!-- LEFT: search + market list -->
+    <section class="panel search-panel" aria-label="Market search">
+      <div class="panel-head"><h2>Markets</h2></div>
+      <div class="search-controls">
+        <input id="searchInput" type="search" placeholder="Search Polymarket + Kalshi…" autocomplete="off" />
+        <div class="provider-toggle" role="group" aria-label="Provider filter">
+          <button class="prov active" data-provider="">All</button>
+          <button class="prov" data-provider="polymarket">Polymarket</button>
+          <button class="prov" data-provider="kalshi">Kalshi</button>
+        </div>
+      </div>
+      <ul id="marketList" class="market-list" aria-live="polite"></ul>
+    </section>
+
+    <!-- CENTER: selected market + order book + controls -->
+    <section class="panel market-panel" aria-label="Selected market">
+      <div id="marketDetail" class="market-detail empty">
+        <p class="placeholder">Select a market to view its order book and model a synthetic option.</p>
+      </div>
+    </section>
+
+    <!-- RIGHT: charts -->
+    <section class="panel charts-panel" aria-label="Payoff and Greeks">
+      <div class="panel-head"><h2>Payoff</h2></div>
+      <div class="chart-wrap"><canvas id="payoffChart" height="150"></canvas></div>
+
+      <div class="panel-head greeks-head">
+        <h2>Greeks</h2>
+        <div class="greek-scalars" id="greekScalars"></div>
+      </div>
+      <div class="greek-grid">
+        <div class="chart-wrap"><div class="chart-label">Delta — ∂V/∂p</div><canvas id="deltaChart" height="120"></canvas></div>
+        <div class="chart-wrap"><div class="chart-label">Gamma — ∂²V/∂p²</div><canvas id="gammaChart" height="120"></canvas></div>
+        <div class="chart-wrap"><div class="chart-label">Theta — ∂V/∂t</div><canvas id="thetaChart" height="120"></canvas></div>
+        <div class="chart-wrap"><div class="chart-label">Vega — ∂V/∂σ</div><canvas id="vegaChart" height="120"></canvas></div>
+      </div>
+      <p class="chart-note" id="chartNote">Pick a market and strike to see live curves.</p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Read-only. No orders are ever sent.</span>
+    <span class="sep">·</span>
+    <span>Greeks and payoff are model outputs, not quotes.</span>
+  </footer>
+
+  <script defer src="/static/app.js"></script>
+</body>
+</html>
