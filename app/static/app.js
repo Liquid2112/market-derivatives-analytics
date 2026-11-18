@@ -20,15 +20,15 @@ const charts = {};
 const reduceMotion =
   window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-/* KTP palette, kept in sync with the CSS variables. */
+/* KTP palette (ktpvandy.org), kept in sync with the CSS variables in styles.css. */
 const COLORS = {
-  blue: "#458fff",
-  navy: "#0b2a5b",
+  blue: "#2f4a8a",
+  navy: "#1b2a52",
   pos: "#0b8f4e",
   neg: "#c23b3b",
-  ink: "#111827",
-  grid: "#e3e8ef",
-  dim: "#6b7280",
+  ink: "#0f172a",
+  grid: "#e2e8f0",
+  dim: "#5b6678",
 };
 
 const el = (id) => document.getElementById(id);

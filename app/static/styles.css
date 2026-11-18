@@ -1,25 +1,31 @@
 /* Market Derivatives Analytics — Robinhood-style single-position layout.
-   KTP (Kappa Theta Pi) palette: one brand blue accent (#458FFF, the
-   fraternity's constitutional color) anchored by a deeper royal navy for
-   depth, cool grays for everything else, on a white / near-white ground.
-   Retune the whole theme from these variables. */
+   KTP (Kappa Theta Pi, Rho Chapter at Vanderbilt) palette, pulled from the
+   live chapter site ktpvandy.org (its editorial.css --ed-* variables):
+   primary brand blue #2F4A8A for actions, deep navy #1b2a52 for headers /
+   dark bands, gold #c8a951 as the highlight accent, slate inks on a cool
+   near-white ground (#f3f6fc). Retune the whole theme from these variables. */
 
 :root {
-  /* KTP blue + navy */
-  --ktp-blue:   #458fff;   /* KTP constitutional brand blue */
-  --ktp-navy:   #0b2a5b;   /* deep royal navy for headers / depth */
-  --ktp-blue-soft: #e8f1ff;
+  /* KTP brand blue + navy (ktpvandy.org) */
+  --ktp-blue:   #2f4a8a;   /* --ed-primary: KTP brand blue, buttons / links */
+  --ktp-navy:   #1b2a52;   /* --ed-navy: deep navy for headers / depth */
+  --ktp-navy-2: #243766;   /* --ed-navy-2: secondary navy */
+  --ktp-gold:   #c8a951;   /* --ed-gold: highlight accent */
+  --ktp-blue-soft: #e7ecf6;/* soft primary-blue tint for subtle surfaces */
+  --ktp-blue-line: #b9c6e2;/* soft primary-blue border */
+  --ktp-ring:   rgba(47,74,138,0.18);  /* focus / selection ring (brand blue) */
+  --ktp-ring-2: rgba(47,74,138,0.16);  /* selected-item ring */
   --accent:     var(--ktp-blue);
 
-  /* cool grays on white */
-  --bg:         #f5f7fa;   /* app ground */
+  /* slate inks on cool near-white (ktpvandy.org) */
+  --bg:         #f3f6fc;   /* --ed-page: app ground */
   --surface:    #ffffff;   /* cards */
-  --surface-2:  #f0f3f8;   /* insets */
-  --line:       #e3e8ef;
-  --line-soft:  #eef1f6;
-  --ink:        #111827;   /* primary text */
-  --ink-dim:    #4b5563;   /* secondary text */
-  --ink-faint:  #6b7280;   /* tertiary / labels */
+  --surface-2:  #eef2f9;   /* insets */
+  --line:       #e2e8f0;   /* --ed-line */
+  --line-soft:  #eef2f8;
+  --ink:        #0f172a;   /* --ed-ink: primary text */
+  --ink-dim:    #4a5568;   /* --ed-muted: secondary text */
+  --ink-faint:  #5b6678;   /* tertiary / labels — KTP slate, darkened from --ed-faint for >=4.5:1 contrast */
 
   --pos:        #0b8f4e;   /* bids / positive P&L */
   --neg:        #c23b3b;   /* asks / negative P&L */
@@ -53,7 +59,7 @@ html, body {
 }
 .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .brand .mark {
-  font-size: 24px; color: var(--ktp-blue);
+  font-size: 24px; color: var(--ktp-gold);  /* KTP gold highlight accent (decorative, aria-hidden) */
   line-height: 1;
 }
 .brand h1 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; color: var(--ktp-navy); }
@@ -63,7 +69,7 @@ html, body {
   border: 1px solid var(--line); border-radius: 999px;
   padding: 5px 11px; white-space: nowrap; background: var(--surface-2);
 }
-.status-chip.mock { color: var(--ktp-blue); border-color: #bcd6ff; background: var(--ktp-blue-soft); }
+.status-chip.mock { color: var(--ktp-blue); border-color: var(--ktp-blue-line); background: var(--ktp-blue-soft); }
 .status-chip.live { color: var(--pos); border-color: #bfe6cf; background: #eafaf1; }
 
 /* ---------- disclaimer ---------- */
@@ -102,15 +108,15 @@ html, body {
   border-radius: var(--radius-sm); color: var(--ink);
   font-family: var(--sans); font-size: 15px;
 }
-#searchInput:focus { outline: none; border-color: var(--ktp-blue); box-shadow: 0 0 0 3px rgba(69,143,255,0.18); }
+#searchInput:focus { outline: none; border-color: var(--ktp-blue); box-shadow: 0 0 0 3px var(--ktp-ring); }
 
 .market-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; }
 .market-item {
   padding: 11px 13px; background: var(--surface); border: 1px solid var(--line);
   border-radius: var(--radius-sm); cursor: pointer; transition: border-color .12s, box-shadow .12s;
 }
-.market-item:hover { border-color: #bcd6ff; }
-.market-item.selected { border-color: var(--ktp-blue); box-shadow: 0 0 0 2px rgba(69,143,255,0.16); }
+.market-item:hover { border-color: var(--ktp-blue-line); }
+.market-item.selected { border-color: var(--ktp-blue); box-shadow: 0 0 0 2px var(--ktp-ring-2); }
 .market-item .mi-title { font-size: 14px; font-weight: 600; line-height: 1.35; color: var(--ink); }
 .market-item .mi-meta {
   display: flex; align-items: center; gap: 8px; margin-top: 7px;
@@ -122,7 +128,7 @@ html, body {
 .badge {
   font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; font-weight: 700;
   padding: 2px 7px; border-radius: 5px;
-  background: var(--ktp-blue-soft); color: var(--ktp-navy); border: 1px solid #cfe0ff;
+  background: var(--ktp-blue-soft); color: var(--ktp-navy); border: 1px solid var(--ktp-blue-line);
 }
 .badge.kalshi { background: #eef6f1; color: #0b6b3c; border-color: #cce9d7; }
 
@@ -144,7 +150,7 @@ html, body {
 .pos-meta { margin: 0; font-size: 12.5px; color: var(--ink-faint); }
 .pos-chosen {
   flex: none; font-size: 12px; font-weight: 700; color: var(--ktp-navy);
-  background: var(--ktp-blue-soft); border: 1px solid #cfe0ff;
+  background: var(--ktp-blue-soft); border: 1px solid var(--ktp-blue-line);
   border-radius: 999px; padding: 6px 12px; white-space: nowrap; text-transform: capitalize;
 }
 
