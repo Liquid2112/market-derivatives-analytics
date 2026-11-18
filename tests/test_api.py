@@ -10,6 +10,7 @@ import os
 
 os.environ["MDA_USE_REAL_BACKENDS"] = "0"
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -146,6 +147,71 @@ def test_derivative_rejects_bad_params():
     assert client.get(f"/api/derivative/{mid}", params={"option_type": "swap", "strike": 0.5}).status_code == 422
     assert client.get(f"/api/derivative/{mid}", params={"side": "flat", "strike": 0.5}).status_code == 422
     assert client.get(f"/api/derivative/{mid}", params={"strike": 1.5}).status_code == 422
+
+
+def test_derivative_bundle_has_pop_and_extrema():
+    """The bundle surfaces model-based probability-of-profit and the side-signed
+    max gain / max loss scalars the UI reads, over the mock (offline) engine."""
+    mid = client.get("/api/markets").json()["markets"][0]["id"]
+    b = client.get(
+        f"/api/derivative/{mid}",
+        params={"option_type": "call", "side": "long", "strike": 0.5},
+    ).json()
+    assert 0.0 <= b["prob_of_profit"] <= 1.0
+    for k in ("max_gain", "max_loss"):
+        assert isinstance(b[k], (int, float))
+    # a long option's downside is bounded: max loss is negative (the premium)
+    # and max gain is positive, and max_gain >= max_loss.
+    assert b["max_loss"] <= 0.0 <= b["max_gain"]
+    assert b["max_gain"] >= b["max_loss"]
+
+
+def test_derivative_long_call_max_loss_is_negative_premium():
+    """Long call: max loss equals the negated premium (bounded downside)."""
+    mid = client.get("/api/markets").json()["markets"][0]["id"]
+    b = client.get(
+        f"/api/derivative/{mid}",
+        params={"option_type": "call", "side": "long", "strike": 0.5},
+    ).json()
+    assert b["max_loss"] == pytest.approx(-b["premium"], abs=1e-4)
+
+
+def test_derivative_long_put_max_loss_is_negative_premium():
+    mid = client.get("/api/markets").json()["markets"][0]["id"]
+    b = client.get(
+        f"/api/derivative/{mid}",
+        params={"option_type": "put", "side": "long", "strike": 0.5},
+    ).json()
+    assert b["max_loss"] == pytest.approx(-b["premium"], abs=1e-4)
+
+
+def test_derivative_short_extrema_mirror_long():
+    """A short position's gain/loss is the sign-flip of the long position's."""
+    mid = client.get("/api/markets").json()["markets"][0]["id"]
+    lng = client.get(
+        f"/api/derivative/{mid}",
+        params={"option_type": "call", "side": "long", "strike": 0.4},
+    ).json()
+    sht = client.get(
+        f"/api/derivative/{mid}",
+        params={"option_type": "call", "side": "short", "strike": 0.4},
+    ).json()
+    assert sht["max_gain"] == pytest.approx(-lng["max_loss"], abs=1e-4)
+    assert sht["max_loss"] == pytest.approx(-lng["max_gain"], abs=1e-4)
+
+
+def test_derivative_pop_long_short_complementary():
+    """Long and short PoP sum to 1 when break-even is inside [0, 1]."""
+    mid = client.get("/api/markets").json()["markets"][0]["id"]
+    lng = client.get(
+        f"/api/derivative/{mid}",
+        params={"option_type": "put", "side": "long", "strike": 0.5},
+    ).json()
+    sht = client.get(
+        f"/api/derivative/{mid}",
+        params={"option_type": "put", "side": "short", "strike": 0.5},
+    ).json()
+    assert lng["prob_of_profit"] + sht["prob_of_profit"] == pytest.approx(1.0, abs=1e-4)
 
 
 def test_index_served():

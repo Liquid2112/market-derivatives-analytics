@@ -25,6 +25,7 @@ from derivatives_engine import (
     max_profit_loss,
     mid_from_book,
     payoff_curve,
+    prob_of_profit,
 )
 
 
@@ -106,6 +107,63 @@ def test_max_profit_loss_short_call_is_mirror():
     short_mpl = max_profit_loss(0.4, OptionType.CALL, Side.SHORT, 0.2)
     assert short_mpl["max_profit"] == pytest.approx(-long_mpl["max_loss"])
     assert short_mpl["max_loss"] == pytest.approx(-long_mpl["max_profit"])
+
+
+def test_long_option_max_loss_is_bounded_premium():
+    # A long option can lose at most the premium paid (bounded downside).
+    for ot in (OptionType.CALL, OptionType.PUT):
+        mpl = max_profit_loss(0.5, ot, Side.LONG, 0.17)
+        assert mpl["max_loss"] == pytest.approx(-0.17)
+
+
+# --------------------------------------------------------------------------
+# Probability of profit (model-based)
+# --------------------------------------------------------------------------
+
+def test_prob_of_profit_long_call_matches_normal_cdf():
+    # Settlement x ~ Normal(p, sigma) with sigma_eff = sigma*sqrt(tau)=0.2.
+    # A long call profits when x > break-even = K + premium.
+    p, k, sigma = 0.6, 0.5, 0.2
+    prem = fair_price(p, k, OptionType.CALL, sigma=sigma)
+    be = k + prem
+    expected = 1.0 - 0.5 * (1.0 + math.erf(((be - p) / sigma) / math.sqrt(2.0)))
+    pop = prob_of_profit(p, k, OptionType.CALL, Side.LONG, prem, sigma=sigma, tau=1.0)
+    assert pop == pytest.approx(expected, abs=1e-12)
+    assert 0.0 <= pop <= 1.0
+
+
+def test_prob_of_profit_long_put_matches_normal_cdf():
+    # A long put profits when x < break-even = K - premium.
+    p, k, sigma = 0.4, 0.5, 0.2
+    prem = fair_price(p, k, OptionType.PUT, sigma=sigma)
+    be = k - prem
+    expected = 0.5 * (1.0 + math.erf(((be - p) / sigma) / math.sqrt(2.0)))
+    pop = prob_of_profit(p, k, OptionType.PUT, Side.LONG, prem, sigma=sigma, tau=1.0)
+    assert pop == pytest.approx(expected, abs=1e-12)
+
+
+def test_prob_of_profit_long_and_short_are_complementary():
+    # The short counterparty profits exactly when the long does not, so the two
+    # model probabilities sum to 1 whenever break-even lies inside [0, 1].
+    for ot in (OptionType.CALL, OptionType.PUT):
+        prem = fair_price(0.55, 0.5, ot, sigma=0.2)
+        lng = prob_of_profit(0.55, 0.5, ot, Side.LONG, prem, sigma=0.2)
+        sht = prob_of_profit(0.55, 0.5, ot, Side.SHORT, prem, sigma=0.2)
+        assert (lng + sht) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_prob_of_profit_unreachable_break_even():
+    # Break-even outside [0, 1]: the long can never recover the premium, so it
+    # never profits (PoP 0); the short always keeps the premium (PoP 1).
+    k, prem = 0.98, 0.5  # K + premium = 1.48 > 1 for a call
+    assert break_even(k, OptionType.CALL, prem) == []
+    assert prob_of_profit(0.95, k, OptionType.CALL, Side.LONG, prem, sigma=0.2) == 0.0
+    assert prob_of_profit(0.95, k, OptionType.CALL, Side.SHORT, prem, sigma=0.2) == 1.0
+
+
+def test_prob_of_profit_rejects_bad_tau():
+    with pytest.raises(ValueError):
+        prob_of_profit(0.5, 0.5, OptionType.CALL, Side.LONG, 0.1, tau=0.0)
 
 
 # --------------------------------------------------------------------------
@@ -311,9 +369,12 @@ def test_analyze_bundle_shape_and_json():
     # required keys
     for key in (
         "inputs", "implied_probability", "fair_price", "break_even",
-        "max_profit", "max_loss", "payoff_curve", "greek_curve", "greeks",
+        "max_profit", "max_loss", "prob_of_profit", "payoff_curve",
+        "greek_curve", "greeks",
     ):
         assert key in bundle
+
+    assert 0.0 <= bundle["prob_of_profit"] <= 1.0
 
     assert bundle["inputs"]["option_type"] == "call"
     assert len(bundle["payoff_curve"]["x"]) == 101
