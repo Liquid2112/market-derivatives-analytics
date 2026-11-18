@@ -12,10 +12,10 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="mark">◧</span>
+      <span class="mark" aria-hidden="true">◧</span>
       <div>
         <h1>Market Derivatives Analytics</h1>
-        <p class="tagline">Prediction-market order books, synthetic options, payoff &amp; Greeks</p>
+        <p class="tagline">One position in focus — payoff, break-even &amp; Greeks</p>
       </div>
     </div>
     <div class="status-chip" id="backendChip" title="Data source">—</div>
@@ -27,44 +27,123 @@
     Every synthetic position shown is a hypothetical model.
   </div>
 
-  <main class="layout">
-    <!-- LEFT: search + market list -->
-    <section class="panel search-panel" aria-label="Market search">
-      <div class="panel-head"><h2>Markets</h2></div>
-      <div class="search-controls">
-        <input id="searchInput" type="search" placeholder="Search Polymarket + Kalshi…" autocomplete="off" />
+  <main class="app">
+    <!-- Market picker: popular markets first -->
+    <section class="picker" aria-label="Choose a market">
+      <div class="picker-head">
+        <label class="picker-label" for="searchInput">Market</label>
         <div class="provider-toggle" role="group" aria-label="Provider filter">
           <button class="prov active" data-provider="">All</button>
           <button class="prov" data-provider="polymarket">Polymarket</button>
           <button class="prov" data-provider="kalshi">Kalshi</button>
         </div>
       </div>
+      <input id="searchInput" type="search" placeholder="Search popular markets…" autocomplete="off" />
       <ul id="marketList" class="market-list" aria-live="polite"></ul>
     </section>
 
-    <!-- CENTER: selected market + order book + controls -->
-    <section class="panel market-panel" aria-label="Selected market">
-      <div id="marketDetail" class="market-detail empty">
-        <p class="placeholder">Select a market to view its order book and model a synthetic option.</p>
+    <!-- The single-position card: the hero of the page -->
+    <section class="position-card" aria-label="Selected position" id="positionCard">
+      <div id="emptyState" class="empty-state">
+        <p class="placeholder">Pick a popular market above to model a synthetic option.</p>
       </div>
-    </section>
 
-    <!-- RIGHT: charts -->
-    <section class="panel charts-panel" aria-label="Payoff and Greeks">
-      <div class="panel-head"><h2>Payoff</h2></div>
-      <div class="chart-wrap"><canvas id="payoffChart" height="150"></canvas></div>
+      <div id="positionBody" class="position-body" hidden>
+        <!-- market + chosen position header -->
+        <header class="pos-header">
+          <div class="pos-market">
+            <span class="badge" id="posProvider">—</span>
+            <h2 class="pos-title" id="posTitle">—</h2>
+            <p class="pos-meta" id="posMeta">—</p>
+          </div>
+          <div class="pos-chosen" id="posChosen">—</div>
+        </header>
 
-      <div class="panel-head greeks-head">
-        <h2>Greeks</h2>
-        <div class="greek-scalars" id="greekScalars"></div>
+        <!-- hero payoff chart -->
+        <div class="hero-chart">
+          <div class="hero-chart-label">Payoff at expiry <span class="axis-hint">(P&amp;L vs. YES probability)</span></div>
+          <div class="hero-canvas-wrap"><canvas id="payoffChart"></canvas></div>
+        </div>
+
+        <!-- position summary stat row -->
+        <div class="stat-row" id="statRow" aria-label="Position summary"></div>
+
+        <!-- compact, collapsible order book -->
+        <div class="orderbook-block">
+          <button class="ob-toggle" id="obToggle" type="button" aria-expanded="false" aria-controls="obDepth">
+            <span class="ob-toggle-label">Order book</span>
+            <span class="ob-summary" id="obSummary">—</span>
+            <span class="ob-chevron" aria-hidden="true">▸</span>
+          </button>
+          <div class="ob-depth" id="obDepth" hidden>
+            <div class="ob-depth-ctrl">
+              <label for="obLevels">Depth</label>
+              <input type="range" id="obLevels" min="1" max="5" step="1" value="3" />
+              <span class="ob-levels-val" id="obLevelsVal">3 levels</span>
+            </div>
+            <div class="ob-cols">
+              <div class="ob-col bids"><h4>Bids</h4><div id="obBids"></div></div>
+              <div class="ob-col asks"><h4>Asks</h4><div id="obAsks"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- option builder: roomy, clearly labeled controls -->
+        <div class="builder" aria-label="Build the synthetic option">
+          <h3 class="builder-title">Build your position</h3>
+          <div class="builder-grid">
+            <div class="field">
+              <span class="field-label">Type</span>
+              <div class="seg" id="typeSeg" role="group" aria-label="Option type">
+                <button type="button" data-v="call">Call</button>
+                <button type="button" data-v="put">Put</button>
+              </div>
+            </div>
+            <div class="field">
+              <span class="field-label">Direction</span>
+              <div class="seg" id="sideSeg" role="group" aria-label="Direction">
+                <button type="button" data-v="long">Long</button>
+                <button type="button" data-v="short">Short</button>
+              </div>
+            </div>
+            <div class="field field-strike">
+              <label class="field-label" for="strikeRange">
+                Strike (probability)
+                <span class="strike-val" id="strikeVal">50%</span>
+              </label>
+              <input type="range" id="strikeRange" min="0" max="1" step="0.01" value="0.5" />
+              <div class="strike-scale"><span>0%</span><span>50%</span><span>100%</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Greeks: compact secondary panel, short charts -->
+        <details class="greeks-block" id="greeksBlock" open>
+          <summary class="greeks-summary">
+            <span class="greeks-title">Greeks</span>
+            <span class="greek-scalars" id="greekScalars"></span>
+          </summary>
+          <div class="greek-grid">
+            <div class="greek-cell">
+              <div class="greek-cell-head"><span class="gc-name">Delta</span><span class="gc-val" id="gvDelta">—</span></div>
+              <div class="greek-canvas-wrap"><canvas id="deltaChart"></canvas></div>
+            </div>
+            <div class="greek-cell">
+              <div class="greek-cell-head"><span class="gc-name">Gamma</span><span class="gc-val" id="gvGamma">—</span></div>
+              <div class="greek-canvas-wrap"><canvas id="gammaChart"></canvas></div>
+            </div>
+            <div class="greek-cell">
+              <div class="greek-cell-head"><span class="gc-name">Theta</span><span class="gc-val" id="gvTheta">—</span></div>
+              <div class="greek-canvas-wrap"><canvas id="thetaChart"></canvas></div>
+            </div>
+            <div class="greek-cell">
+              <div class="greek-cell-head"><span class="gc-name">Vega</span><span class="gc-val" id="gvVega">—</span></div>
+              <div class="greek-canvas-wrap"><canvas id="vegaChart"></canvas></div>
+            </div>
+          </div>
+          <p class="chart-note" id="chartNote">Greeks are model outputs, not quotes.</p>
+        </details>
       </div>
-      <div class="greek-grid">
-        <div class="chart-wrap"><div class="chart-label">Delta — ∂V/∂p</div><canvas id="deltaChart" height="120"></canvas></div>
-        <div class="chart-wrap"><div class="chart-label">Gamma — ∂²V/∂p²</div><canvas id="gammaChart" height="120"></canvas></div>
-        <div class="chart-wrap"><div class="chart-label">Theta — ∂V/∂t</div><canvas id="thetaChart" height="120"></canvas></div>
-        <div class="chart-wrap"><div class="chart-label">Vega — ∂V/∂σ</div><canvas id="vegaChart" height="120"></canvas></div>
-      </div>
-      <p class="chart-note" id="chartNote">Pick a market and strike to see live curves.</p>
     </section>
   </main>
 

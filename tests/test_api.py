@@ -73,6 +73,16 @@ def test_search_query_not_reordered_by_volume():
     assert any("bitcoin" in t for t in titles)
 
 
+def test_default_markets_are_popular_first():
+    """The default landing view ranks markets by traded volume descending so
+    popular, recognizable markets lead (an explicit search is not reordered)."""
+    markets = client.get("/api/markets").json()["markets"]
+    vols = [m["volume"] for m in markets if m.get("volume") is not None]
+    assert vols == sorted(vols, reverse=True)
+    # the single most-traded market is at the top of the default view
+    assert markets[0]["volume"] == max(vols)
+
+
 def test_search_filters_by_query():
     r = client.get("/api/markets", params={"q": "bitcoin"})
     assert r.status_code == 200
