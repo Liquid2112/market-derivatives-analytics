@@ -28,6 +28,8 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+
+import httpx
 from typing import Any, Protocol
 
 
@@ -376,9 +378,14 @@ def _market_summary(market) -> dict[str, Any]:
     }
 
 
+# A bounded per-request timeout (seconds) for live provider calls on the
+# search path. Kept short so a slow or unresponsive provider fails fast and
+# the view degrades to the other provider instead of hanging for ~20s.
+_SEARCH_TIMEOUT = 8.0
+
+
 class _RealDataLayer:
     """DataLayer over mdlab's Polymarket + Kalshi read-only clients.
-
     The clients are injected so tests can pass fixture-backed ``httpx`` clients
     (no network). The default constructor builds live read-only clients.
     """
@@ -387,8 +394,13 @@ class _RealDataLayer:
         from mdlab.kalshi import KalshiClient
         from mdlab.polymarket import PolymarketClient
 
-        self._poly = polymarket_client or PolymarketClient()
-        self._kalshi = kalshi_client or KalshiClient()
+        # A bounded per-request timeout so one slow provider degrades
+        # gracefully (we return what the other gave) instead of the whole
+        # search hanging for tens of seconds.
+        self._poly = polymarket_client or PolymarketClient(
+            timeout=_SEARCH_TIMEOUT
+        )
+        self._kalshi = kalshi_client or KalshiClient(timeout=_SEARCH_TIMEOUT)
 
     def search_markets(
         self, query: str, provider: str | None = None, limit: int = 25
@@ -396,21 +408,33 @@ class _RealDataLayer:
         q = (query or "").strip() or None
         out: list[dict[str, Any]] = []
         want = {provider} if provider else {"polymarket", "kalshi"}
+        # Each provider is queried independently: a timeout or error from one
+        # must not blank out results the other returned, so we swallow the
+        # failure per-provider and return what we have.
         if "polymarket" in want:
-            for m in self._poly.list_markets(limit=limit, search=q):
-                if m.yes_price is None:
-                    continue
-                out.append(_market_summary(m))
+            out.extend(self._safe_list(self._poly, q, limit))
         if "kalshi" in want:
-            for m in self._kalshi.list_markets(limit=limit, search=q):
-                if m.yes_price is None:
-                    continue
-                out.append(_market_summary(m))
+            out.extend(self._safe_list(self._kalshi, q, limit))
         # Rank the default landing view by traded volume so popular,
         # recognizable markets lead; a text search keeps relevance order.
         if q is None:
             out.sort(key=_popularity_key, reverse=True)
         return out[:limit]
+
+    @staticmethod
+    def _safe_list(client, q: str | None, limit: int) -> list[dict[str, Any]]:
+        """Fetch + summarize one provider, returning [] if it fails.
+
+        A provider outage, timeout, or malformed response degrades the view to
+        the other provider rather than failing the whole request.
+        """
+        try:
+            markets = client.list_markets(limit=limit, search=q)
+        except (httpx.HTTPError, ValueError, KeyError):
+            return []
+        return [
+            _market_summary(m) for m in markets if m.yes_price is not None
+        ]
 
     def get_market(self, market_id: str) -> dict[str, Any]:
         provider, native = _split_id(market_id)

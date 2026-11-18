@@ -197,6 +197,12 @@ class KalshiClient:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
+    # When searching, Kalshi's public API has no text param, so we page
+    # through the open book and filter client-side. Bounded so one slow page
+    # cannot stall the request; Kalshi caps page size at 1000.
+    _SEARCH_PAGE_SIZE = 1000
+    _SEARCH_MAX_PAGES = 8
+
     def list_markets(
         self,
         *,
@@ -209,21 +215,50 @@ class KalshiClient:
 
         ``series_ticker`` narrows to one Kalshi series. The public API has no
         free-text search param, so ``search`` is applied client-side against
-        the title/subtitle.
+        the title/subtitle. Without a query we fetch a single ``limit`` page.
+        With one, we page through the open book (bounded by
+        ``_SEARCH_MAX_PAGES``) so matches beyond the first page are found,
+        stopping as soon as ``limit`` matches are collected.
         """
-        params: dict[str, Any] = {"limit": limit}
-        if status:
-            params["status"] = status
-        if series_ticker:
-            params["series_ticker"] = series_ticker
-        resp = self._client.get(f"{self.api_base}/markets", params=params)
-        resp.raise_for_status()
-        rows = resp.json().get("markets", [])
-        markets = [normalize_market(row) for row in rows]
-        if search:
-            needle = search.lower()
-            markets = [m for m in markets if needle in m.title.lower()]
-        return markets
+        if not search:
+            params: dict[str, Any] = {"limit": limit}
+            if status:
+                params["status"] = status
+            if series_ticker:
+                params["series_ticker"] = series_ticker
+            resp = self._client.get(f"{self.api_base}/markets", params=params)
+            resp.raise_for_status()
+            rows = resp.json().get("markets", [])
+            return [normalize_market(row) for row in rows]
+
+        needle = search.lower()
+        matches: list[Market] = []
+        cursor: Optional[str] = None
+        for _ in range(self._SEARCH_MAX_PAGES):
+            params = {"limit": self._SEARCH_PAGE_SIZE}
+            if status:
+                params["status"] = status
+            if series_ticker:
+                params["series_ticker"] = series_ticker
+            if cursor:
+                params["cursor"] = cursor
+            resp = self._client.get(f"{self.api_base}/markets", params=params)
+            resp.raise_for_status()
+            body = resp.json()
+            rows = body.get("markets", [])
+            for row in rows:
+                m = normalize_market(row)
+                if needle in m.title.lower():
+                    matches.append(m)
+                    if len(matches) >= limit:
+                        return matches
+            cursor = body.get("cursor")
+            if not cursor or not rows:
+                break
+        # shortcut: Kalshi has no server-side text search, so a term whose
+        # markets lie past _SEARCH_MAX_PAGES of the open book is missed; raise
+        # the page bound or add a Kalshi search endpoint if one ships.
+        return matches
 
     def get_market(self, ticker: str) -> Market:
         """Fetch a single market's metadata by ticker (no order book)."""

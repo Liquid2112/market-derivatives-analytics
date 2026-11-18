@@ -193,19 +193,54 @@ class PolymarketClient:
     ) -> list[Market]:
         """List or search open markets (metadata only, no order book).
 
-        ``search`` filters by free text when supplied. ``closed=False`` (the
-        default) restricts to markets that are still open.
+        With ``search`` the free-text query is routed to Gamma's
+        ``/public-search`` endpoint, which actually matches on title/text; the
+        plain ``/markets`` endpoint ignores a query param and returns a generic
+        list, so a search there would silently return irrelevant markets.
+        ``closed=False`` (the default) restricts to markets still open.
         """
+        if search:
+            return self._search_markets(search, limit=limit, closed=closed)
         params: dict[str, Any] = {"limit": limit}
         if closed is not None:
             params["closed"] = str(closed).lower()
-        if search:
-            params["_query"] = search
         resp = self._client.get(f"{self.gamma_base}/markets", params=params)
         resp.raise_for_status()
         data = resp.json()
         rows = data if isinstance(data, list) else data.get("data", [])
         return [normalize_market(row) for row in rows]
+
+    def _search_markets(
+        self, search: str, *, limit: int, closed: Optional[bool]
+    ) -> list[Market]:
+        """Text search via Gamma ``/public-search``.
+
+        The endpoint returns ``{"events": [{..., "markets": [...]}]}``; each
+        inner market is the same Gamma market shape ``normalize_market`` reads.
+        We flatten the events' markets, drop closed ones unless asked for them,
+        and cap at ``limit``.
+        """
+        params: dict[str, Any] = {"q": search, "limit_per_type": limit}
+        # public-search returns closed (historical) events by default; ask for
+        # active ones so an open-markets search is not drowned by finished
+        # games. We still defensively drop any closed row below.
+        if closed is False:
+            params["events_status"] = "active"
+        resp = self._client.get(
+            f"{self.gamma_base}/public-search", params=params
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        events = data.get("events") or [] if isinstance(data, dict) else []
+        markets: list[Market] = []
+        for event in events:
+            for row in event.get("markets") or []:
+                if closed is False and row.get("closed") is True:
+                    continue
+                markets.append(normalize_market(row))
+                if len(markets) >= limit:
+                    return markets
+        return markets
 
     def get_market(self, market_id: str) -> Market:
         """Fetch a single market's metadata by Gamma id (no order book)."""
