@@ -218,3 +218,38 @@ def test_index_served():
     r = client.get("/")
     assert r.status_code == 200
     assert "Analytics and modeling only" in r.text
+
+
+def test_derivative_tau_param_defaults_and_accepts_range():
+    """The optional tau query param (modeled time-to-resolution) defaults to the
+    full horizon and accepts any value in (0, 1]; out-of-range is rejected."""
+    mid = client.get("/api/markets").json()["markets"][0]["id"]
+    base = {"option_type": "call", "side": "long", "strike": 0.5}
+    # default (no tau) and explicit tau=1.0 agree
+    default = client.get(f"/api/derivative/{mid}", params=base).json()
+    full = client.get(f"/api/derivative/{mid}", params={**base, "tau": 1.0}).json()
+    assert default["greeks"]["gamma"] == pytest.approx(full["greeks"]["gamma"], abs=1e-9)
+    # a mid-range horizon is accepted
+    assert client.get(f"/api/derivative/{mid}", params={**base, "tau": 0.25}).status_code == 200
+    # tau must stay in (0, 1]
+    assert client.get(f"/api/derivative/{mid}", params={**base, "tau": 0.0}).status_code == 422
+    assert client.get(f"/api/derivative/{mid}", params={**base, "tau": 1.5}).status_code == 422
+
+
+def test_derivative_tau_tightens_dispersion_sensitivities():
+    """Scrubbing tau toward 0 tightens the modeled dispersion, so gamma peaks
+    higher and theta's magnitude shrinks; break-even/premium stay tau-invariant
+    (the engine's fair_price does not depend on tau), which the UI copy reflects.
+    """
+    mid = client.get("/api/markets").json()["markets"][0]["id"]
+    base = {"option_type": "call", "side": "long", "strike": 0.5}
+    far = client.get(f"/api/derivative/{mid}", params={**base, "tau": 1.0}).json()
+    near = client.get(f"/api/derivative/{mid}", params={**base, "tau": 0.05}).json()
+    # near resolution the model concentrates at the strike: the gamma curve's
+    # peak (across the probability grid) is higher with a shorter horizon.
+    far_peak = max(abs(pt["value"]) for pt in far["greek_curves"]["gamma"])
+    near_peak = max(abs(pt["value"]) for pt in near["greek_curves"]["gamma"])
+    assert near_peak > far_peak
+    # premium and break-even do not move with tau in this model
+    assert near["premium"] == pytest.approx(far["premium"], abs=1e-9)
+    assert near["break_even"] == pytest.approx(far["break_even"], abs=1e-9)

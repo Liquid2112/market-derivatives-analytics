@@ -12,6 +12,8 @@ const state = {
   optionType: "call",
   side: "long",
   strike: 0.5,
+  tau: 1.0,             // modeled time-to-resolution in (0, 1]; 1 = far from resolving
+  bundle: null,        // last derivative bundle (for the what-if scrub)
   obExpanded: false,
   obLevels: 3,
 };
@@ -29,6 +31,7 @@ const COLORS = {
   ink: "#0f172a",
   grid: "#e2e8f0",
   dim: "#5b6678",
+  gold: "#c8a951",
 };
 
 const el = (id) => document.getElementById(id);
@@ -189,41 +192,51 @@ function toggleOrderBook() {
   el("obDepth").hidden = !state.obExpanded;
 }
 
-/* ---------- derivative bundle -> payoff + stats + Greeks ---------- */
+/* ---------- derivative bundle -> payoff + summary + sensitivities ---------- */
 async function refreshDerivative() {
   if (!state.selected) return;
   const params = new URLSearchParams({
     option_type: state.optionType,
     side: state.side,
     strike: String(state.strike),
+    tau: String(state.tau),
   });
   try {
     const b = await api(`/api/derivative/${encodeURIComponent(state.selected.id)}?` + params.toString());
+    state.bundle = b;
     updateChosenBadge(b);
-    renderStatRow(b);
+    renderSummaryStrip(b);
     renderPayoff(b);
     renderGreeks(b);
+    renderProbScrub();
   } catch (e) {
     el("chartNote").textContent = "Error: " + e.message;
   }
 }
 
-function renderStatRow(b) {
-  const payoffs = b.payoff_curve.map((d) => d.payoff);
-  const maxPnl = Math.max(...payoffs);
-  const minPnl = Math.min(...payoffs);
-  const atUnderlying = b.payoff_curve.reduce((best, d) =>
-    Math.abs(d.p - b.underlying_prob) < Math.abs(best.p - b.underlying_prob) ? d : best,
-    b.payoff_curve[0]);
-  const stat = (label, val, cls) =>
-    `<div class="stat"><div class="stat-label">${label}</div><div class="stat-val ${cls || ""}">${val}</div></div>`;
-  el("statRow").innerHTML =
-    stat("Premium / fair value", fmtNum(b.premium, 3)) +
-    stat("Break-even", fmtPct(b.break_even)) +
-    stat("Implied prob", fmtPct(b.implied_prob)) +
-    stat("P&L at current", fmtNum(atUnderlying.payoff, 3), atUnderlying.payoff >= 0 ? "pos" : "neg") +
-    stat("Max gain", fmtNum(maxPnl, 3), "pos") +
-    stat("Max loss", fmtNum(minPnl, 3), minPnl < 0 ? "neg" : "");
+/* Money is $ per $1 contract; always carry the sign so a loss reads as negative. */
+const fmtMoney = (x) =>
+  x == null ? "—" : (x < 0 ? "−$" : "$") + Math.abs(Number(x)).toFixed(3);
+
+function renderSummaryStrip(b) {
+  // Use the API's own side-signed scalars, not a re-derivation.
+  const tile = (label, val, cls, sub) =>
+    `<div class="sum-tile">
+       <div class="sum-label">${label}</div>
+       <div class="sum-val ${cls || ""}">${val}</div>
+       ${sub ? `<div class="sum-sub">${sub}</div>` : ""}
+     </div>`;
+
+  el("summaryStrip").innerHTML =
+    tile("You pay", fmtMoney(b.premium), "", "premium, per $1 contract") +
+    tile("Max you'd make", fmtMoney(b.max_gain), "pos", "per $1 contract") +
+    tile("Max you'd lose", fmtMoney(b.max_loss), b.max_loss < 0 ? "neg" : "", "per $1 contract") +
+    tile("Break-even", fmtPct(b.break_even), "", "YES probability") +
+    tile("Chance of profit", fmtPct(b.prob_of_profit), "accent", "model-based");
+
+  el("summaryNote").textContent =
+    "“You pay”, “max make” and “max lose” are exact from the payoff — model-free. " +
+    "“Chance of profit” is model-based (Bachelier), so treat it as a modeled estimate, not odds.";
 }
 
 /* ---------- Chart.js helpers ---------- */
@@ -233,7 +246,7 @@ const baseAxis = {
   ticks: { color: COLORS.dim, font: { size: 10 } },
 };
 
-function lineChart(canvasId, labels, data, color, fillZero, compact) {
+function lineChart(canvasId, labels, data, color, fillZero, compact, guides) {
   if (charts[canvasId]) charts[canvasId].destroy();
   const ctx = el(canvasId).getContext("2d");
   charts[canvasId] = new Chart(ctx, {
@@ -264,14 +277,71 @@ function lineChart(canvasId, labels, data, color, fillZero, compact) {
         y: { ...baseAxis, ticks: { ...baseAxis.ticks, maxTicksLimit: compact ? 4 : 6 } },
       },
     },
+    plugins: guides ? [payoffGuides] : [],
   });
+  if (guides) charts[canvasId].$guides = guides;
+  return charts[canvasId];
 }
 
 function renderPayoff(b) {
   const labels = b.payoff_curve.map((d) => (d.p * 100).toFixed(0));
   const data = b.payoff_curve.map((d) => d.payoff);
-  lineChart("payoffChart", labels, data, COLORS.blue, true, false);
+  lineChart("payoffChart", labels, data, COLORS.blue, true, false, {
+    breakEven: b.break_even,      // YES probability 0..1
+    underlying: b.underlying_prob,
+    maxGain: b.max_gain,
+    maxLoss: b.max_loss,
+  });
 }
+
+/* Draw the break-even vertical line, the current-underlying marker, and the
+   max-gain / max-loss horizontal guides directly on the payoff curve, so the
+   three summary numbers are visible ON the chart. Pure canvas, no plugin dep. */
+const payoffGuides = {
+  id: "payoffGuides",
+  afterDatasetsDraw(chart, _args, opts) {
+    const g = chart.$guides;
+    if (!g) return;
+    const { ctx, chartArea: area, scales } = chart;
+    const xAt = (p) => scales.x.getPixelForValue(Math.round(p * 100));
+    const yAt = (v) => scales.y.getPixelForValue(v);
+    ctx.save();
+    ctx.font = "10px -apple-system, Segoe UI, sans-serif";
+
+    // horizontal guides for max gain / max loss
+    const hline = (val, color, label) => {
+      if (val == null || val < scales.y.min || val > scales.y.max) return;
+      const y = yAt(val);
+      ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(area.left, y); ctx.lineTo(area.right, y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = color; ctx.textAlign = "right"; ctx.textBaseline = val >= 0 ? "bottom" : "top";
+      ctx.fillText(label, area.right - 4, y + (val >= 0 ? -2 : 2));
+    };
+    hline(g.maxGain, COLORS.pos, "max gain " + fmtMoney(g.maxGain));
+    hline(g.maxLoss, COLORS.neg, "max loss " + fmtMoney(g.maxLoss));
+
+    // vertical break-even line
+    if (g.breakEven != null) {
+      const x = xAt(g.breakEven);
+      ctx.strokeStyle = COLORS.navy; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+      ctx.beginPath(); ctx.moveTo(x, area.top); ctx.lineTo(x, area.bottom); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = COLORS.navy; ctx.textAlign = x > (area.left + area.right) / 2 ? "right" : "left";
+      ctx.textBaseline = "top";
+      ctx.fillText("break-even " + (g.breakEven * 100).toFixed(0) + "%", x + (ctx.textAlign === "right" ? -4 : 4), area.top + 2);
+    }
+
+    // current-underlying marker (where the market sits now)
+    if (g.underlying != null) {
+      const x = xAt(g.underlying);
+      ctx.strokeStyle = COLORS.gold; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(x, area.top); ctx.lineTo(x, area.bottom); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  },
+};
 
 function renderGreeks(b) {
   const g = b.greek_curves;
@@ -293,6 +363,31 @@ function renderGreeks(b) {
     <span class="gs">ν <b>${fmtNum(b.greeks.vega, 2)}</b></span>`;
   el("chartNote").textContent =
     `${b.side} ${b.option_type} · strike ${fmtPct(b.strike)} · underlying YES ${fmtPct(b.underlying_prob)}`;
+}
+
+/* ---------- what-if probability scrub ---------- */
+/* Reads premium (model fair value), payoff and the modeled chance-of-profit at a
+   hypothetical YES probability the user drags to. Payoff is exact at that level
+   (from the curve); premium/PoP are the model's, shown for intuition only. */
+function renderProbScrub() {
+  const b = state.bundle;
+  const scrub = el("probScrub");
+  if (!b) return;
+  // default the marker to the current underlying the first time
+  if (scrub.dataset.touched !== "1") {
+    scrub.value = String(b.underlying_prob);
+  }
+  const p = parseFloat(scrub.value);
+  el("probScrubVal").textContent = fmtPct(p);
+
+  // nearest payoff sample on the 0..1 grid
+  const pt = b.payoff_curve.reduce((best, d) =>
+    Math.abs(d.p - p) < Math.abs(best.p - p) ? d : best, b.payoff_curve[0]);
+  const side = p >= b.break_even ? "above" : "below";
+  el("probScrubReadout").innerHTML =
+    `If it settles around <b>${fmtPct(p)}</b> YES: payoff ` +
+    `<b class="${pt.payoff >= 0 ? "pos" : "neg"}">${fmtMoney(pt.payoff)}</b> per $1 contract ` +
+    `(${side} your ${fmtPct(b.break_even)} break-even).`;
 }
 
 /* ---------- utils ---------- */
@@ -335,6 +430,24 @@ function init() {
     el("strikeVal").textContent = fmtPct(state.strike);
   });
   range.addEventListener("change", refreshDerivative);
+
+  // time-to-resolution (tau): a modeled resolution horizon, not a listed expiry
+  const tau = el("tauRange");
+  const fmtTau = (t) =>
+    t <= 0.12 ? "about to resolve" : t >= 0.9 ? "far off" : "partway";
+  tau.addEventListener("input", () => {
+    state.tau = parseFloat(tau.value);
+    el("tauVal").textContent = fmtTau(state.tau);
+  });
+  tau.addEventListener("change", refreshDerivative);
+  el("tauVal").textContent = fmtTau(state.tau);
+
+  // what-if probability scrub (read-only; does not re-request the bundle)
+  const scrub = el("probScrub");
+  scrub.addEventListener("input", () => {
+    scrub.dataset.touched = "1";
+    renderProbScrub();
+  });
 
   // order book controls
   el("obToggle").addEventListener("click", toggleOrderBook);

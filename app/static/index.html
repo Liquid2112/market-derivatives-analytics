@@ -61,12 +61,30 @@
 
         <!-- hero payoff chart -->
         <div class="hero-chart">
-          <div class="hero-chart-label">Payoff at expiry <span class="axis-hint">(P&amp;L vs. YES probability)</span></div>
+          <div class="hero-chart-label">Payoff at resolution <span class="axis-hint">(what $1 of this position returns vs. the YES probability it settles at)</span></div>
           <div class="hero-canvas-wrap"><canvas id="payoffChart"></canvas></div>
+          <p class="chart-legend" id="payoffLegend">Dashed line = break-even · guides mark max gain / max loss. All figures are $ per $1 contract.</p>
         </div>
 
-        <!-- position summary stat row -->
-        <div class="stat-row" id="statRow" aria-label="Position summary"></div>
+        <!-- position summary strip: the plain-language numbers, up front -->
+        <div class="summary-block" aria-label="Position summary">
+          <div class="summary-head">
+            <span class="summary-title">Your position</span>
+            <span class="summary-sub">Pay the premium now → receive the payoff if it resolves your way. $ per $1 contract.</span>
+          </div>
+          <div class="summary-strip" id="summaryStrip"></div>
+          <p class="summary-note" id="summaryNote"></p>
+        </div>
+
+        <!-- what-if probability scrub: read the position at any hypothetical YES level -->
+        <div class="scrub-block" aria-label="What-if probability">
+          <label class="scrub-label" for="probScrub">
+            Read at a hypothetical YES probability
+            <span class="scrub-val" id="probScrubVal">—</span>
+          </label>
+          <input type="range" id="probScrub" min="0" max="1" step="0.01" value="0.5" />
+          <p class="scrub-readout" id="probScrubReadout">—</p>
+        </div>
 
         <!-- compact, collapsible order book -->
         <div class="orderbook-block">
@@ -114,31 +132,48 @@
               <input type="range" id="strikeRange" min="0" max="1" step="0.01" value="0.5" />
               <div class="strike-scale"><span>0%</span><span>50%</span><span>100%</span></div>
             </div>
+            <div class="field field-strike">
+              <label class="field-label" for="tauRange">
+                <span>Time to resolution <span class="field-hint">(modeled horizon, not a listed expiry)</span></span>
+                <span class="strike-val" id="tauVal">now → far</span>
+              </label>
+              <input type="range" id="tauRange" min="0.02" max="1" step="0.02" value="1" />
+              <div class="strike-scale"><span>about to resolve</span><span>far off</span></div>
+            </div>
           </div>
         </div>
 
-        <!-- Greeks: compact secondary panel, short charts -->
-        <details class="greeks-block" id="greeksBlock" open>
+        <!-- Sensitivities: model-based, demoted below the summary + payoff -->
+        <details class="greeks-block" id="greeksBlock">
           <summary class="greeks-summary">
-            <span class="greeks-title">Greeks</span>
+            <span class="greeks-title">Sensitivities <span class="greeks-model-tag">model-based</span></span>
             <span class="greek-scalars" id="greekScalars"></span>
           </summary>
+          <p class="greeks-caption">
+            How the modeled value reacts to the inputs. These come from the Bachelier
+            model, not from quotes — vega and theta especially are analogies, since
+            “how unresolved” and “time to resolution” here are modeled, not listed.
+          </p>
           <div class="greek-grid">
             <div class="greek-cell">
               <div class="greek-cell-head"><span class="gc-name">Delta</span><span class="gc-val" id="gvDelta">—</span></div>
+              <p class="gc-gloss">Value change per +1% YES probability.</p>
               <div class="greek-canvas-wrap"><canvas id="deltaChart"></canvas></div>
             </div>
             <div class="greek-cell">
               <div class="greek-cell-head"><span class="gc-name">Gamma</span><span class="gc-val" id="gvGamma">—</span></div>
+              <p class="gc-gloss">How fast delta changes — peaks at the strike.</p>
               <div class="greek-canvas-wrap"><canvas id="gammaChart"></canvas></div>
             </div>
             <div class="greek-cell">
-              <div class="greek-cell-head"><span class="gc-name">Theta</span><span class="gc-val" id="gvTheta">—</span></div>
-              <div class="greek-canvas-wrap"><canvas id="thetaChart"></canvas></div>
+              <div class="greek-cell-head"><span class="gc-name">Vega</span><span class="gc-val" id="gvVega">—</span></div>
+              <p class="gc-gloss">Sensitivity to how unresolved the market is (model analogy).</p>
+              <div class="greek-canvas-wrap"><canvas id="vegaChart"></canvas></div>
             </div>
             <div class="greek-cell">
-              <div class="greek-cell-head"><span class="gc-name">Vega</span><span class="gc-val" id="gvVega">—</span></div>
-              <div class="greek-canvas-wrap"><canvas id="vegaChart"></canvas></div>
+              <div class="greek-cell-head"><span class="gc-name">Theta</span><span class="gc-val" id="gvTheta">—</span></div>
+              <p class="gc-gloss">Decay as resolution nears (model analogy).</p>
+              <div class="greek-canvas-wrap"><canvas id="thetaChart"></canvas></div>
             </div>
           </div>
           <p class="chart-note" id="chartNote">Greeks are model outputs, not quotes.</p>

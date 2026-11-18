@@ -63,6 +63,17 @@ def get_derivative(
     option_type: str = Query("call", description="call | put"),
     side: str = Query("long", description="long | short"),
     strike: float = Query(..., ge=0.0, le=1.0, description="Strike as a probability 0..1"),
+    tau: float = Query(
+        1.0,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Modeled time-to-resolution in (0, 1] (a resolution horizon "
+            "analogue, not a listed expiry). Default 1.0. Shrinking it toward "
+            "0 tightens the model dispersion, so the model-based Greeks and "
+            "probability-of-profit update accordingly."
+        ),
+    ),
 ) -> JSONResponse:
     option_type = option_type.lower()
     side = side.lower()
@@ -80,6 +91,7 @@ def get_derivative(
         strike=float(strike),
         option_type=option_type,
         side=side,
+        tau=float(tau),
     )
     bundle["market"] = {
         "id": market["id"],

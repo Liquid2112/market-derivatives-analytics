@@ -160,19 +160,38 @@ html, body {
 .hero-chart-label .axis-hint { font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--ink-faint); }
 .hero-canvas-wrap { position: relative; height: 230px; }
 .hero-canvas-wrap canvas { position: absolute; inset: 0; }
+.chart-legend { margin: 0; font-size: 11.5px; color: var(--ink-faint); }
 
-/* stat row */
-.stat-row {
-  display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px;
-}
-.stat {
+/* position summary strip */
+.summary-block { display: flex; flex-direction: column; gap: 10px; }
+.summary-head { display: flex; flex-direction: column; gap: 2px; }
+.summary-title { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); }
+.summary-sub { font-size: 12.5px; color: var(--ink-dim); }
+.summary-strip { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.sum-tile {
   background: var(--surface-2); border: 1px solid var(--line-soft);
-  border-radius: var(--radius-sm); padding: 11px 12px;
+  border-radius: var(--radius-sm); padding: 12px 13px;
 }
-.stat-label { font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
-.stat-val { margin-top: 3px; font-size: 17px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
-.stat-val.pos { color: var(--pos); }
-.stat-val.neg { color: var(--neg); }
+.sum-label { font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
+.sum-val { margin-top: 3px; font-size: 19px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+.sum-val.pos { color: var(--pos); }
+.sum-val.neg { color: var(--neg); }
+.sum-val.accent { color: var(--ktp-blue); }
+.sum-sub { margin-top: 3px; font-size: 10.5px; color: var(--ink-faint); }
+.summary-note { margin: 0; font-size: 11.5px; color: var(--ink-faint); }
+
+/* what-if probability scrub */
+.scrub-block {
+  background: var(--surface-2); border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm); padding: 14px 14px 12px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.scrub-label { font-size: 12.5px; font-weight: 600; color: var(--ink-dim); display: flex; justify-content: space-between; align-items: baseline; }
+.scrub-val { font-size: 16px; font-weight: 700; color: var(--ktp-blue); font-variant-numeric: tabular-nums; }
+.scrub-readout { margin: 0; font-size: 12.5px; color: var(--ink-dim); }
+.scrub-readout b { font-variant-numeric: tabular-nums; }
+.scrub-readout b.pos { color: var(--pos); }
+.scrub-readout b.neg { color: var(--neg); }
 
 /* ---------- order book (compact + collapsible) ---------- */
 .orderbook-block { border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
@@ -207,6 +226,7 @@ html, body {
 .builder-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 14px; }
 .field { display: flex; flex-direction: column; gap: 8px; }
 .field-label { font-size: 12.5px; font-weight: 600; color: var(--ink-dim); display: flex; justify-content: space-between; align-items: baseline; }
+.field-hint { font-weight: 500; color: var(--ink-faint); font-size: 10.5px; }
 .field-strike { grid-column: 1 / -1; }
 .strike-val { font-size: 16px; font-weight: 700; color: var(--ktp-blue); font-variant-numeric: tabular-nums; }
 .seg { display: flex; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }
@@ -232,6 +252,13 @@ input[type="range"] {
 }
 .greeks-summary::-webkit-details-marker { display: none; }
 .greeks-title { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); }
+.greeks-model-tag {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--ktp-navy); background: var(--ktp-blue-soft); border: 1px solid var(--ktp-blue-line);
+  border-radius: 5px; padding: 1px 6px; margin-left: 6px;
+}
+.greeks-caption { margin: 0 14px 6px; font-size: 12px; color: var(--ink-dim); }
+.gc-gloss { margin: 0 0 8px; font-size: 11px; color: var(--ink-faint); line-height: 1.35; }
 .greek-scalars { display: flex; gap: 12px; margin-left: auto; font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .greek-scalars .gs { color: var(--ink-dim); }
 .greek-scalars .gs b { color: var(--ktp-navy); font-weight: 700; }
@@ -260,7 +287,7 @@ input[type="range"] {
 /* ---------- wider screens: keep the single card centered & calm ---------- */
 @media (min-width: 720px) {
   .app { max-width: 680px; }
-  .stat-row { grid-template-columns: repeat(4, 1fr); }
+  .summary-strip { grid-template-columns: repeat(5, 1fr); }
   .hero-canvas-wrap { height: 260px; }
   .greek-canvas-wrap { height: 160px; }
 }
