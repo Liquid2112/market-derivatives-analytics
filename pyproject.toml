@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "derivatives-engine"
+version = "0.1.0"
+description = "Synthetic options analytics for binary prediction markets (payoff, break-even, implied probability, Greeks)."
+readme = "README_ENGINE.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["derivatives_engine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
