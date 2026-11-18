@@ -248,15 +248,22 @@ class PolymarketClient:
         resp.raise_for_status()
         return normalize_market(resp.json())
 
-    def get_order_book(self, market_id: str) -> OrderBook:
+    def get_order_book(
+        self, market_id: str, *, raw: Optional[dict] = None
+    ) -> OrderBook:
         """Fetch the live YES-outcome order book for a market id.
 
         Looks up the market's YES CLOB token, then reads ``/book`` from the
-        CLOB. Raises ``ValueError`` if the market exposes no CLOB token.
+        CLOB. Pass ``raw`` (the Gamma market payload, e.g. ``Market.raw`` from
+        a just-fetched market) to skip the extra metadata round-trip and use
+        that payload for the token lookup. Raises ``ValueError`` if the market
+        exposes no CLOB token.
         """
-        resp = self._client.get(f"{self.gamma_base}/markets/{market_id}")
-        resp.raise_for_status()
-        token_id = _yes_token_id(resp.json())
+        if raw is None:
+            resp = self._client.get(f"{self.gamma_base}/markets/{market_id}")
+            resp.raise_for_status()
+            raw = resp.json()
+        token_id = _yes_token_id(raw)
         if not token_id:
             raise ValueError(f"market {market_id} has no CLOB token id")
         book_resp = self._client.get(

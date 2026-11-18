@@ -92,28 +92,60 @@ def normalize_order_book(raw: dict) -> OrderBook:
     return OrderBook(bids=bids, asks=asks)
 
 
+def _quote_price(value: Any) -> Optional[float]:
+    """Parse a Kalshi quote/last field, treating a 0 as 'no quote'.
+
+    Kalshi prices live in cents (minimum $0.01), so ``"0.0000"`` is not a
+    one-cent quote — it is the sentinel for *no resting order* (an empty bid or
+    ask side) or *never traded* (last price). We map it to ``None`` so a market
+    with no real quote surfaces as 'no price' instead of a misleading $0.00.
+    """
+    p = _to_price(value)
+    if p is None or p <= 0.0:
+        return None
+    return p
+
+
+def _resolve_price(
+    bid: Optional[float], ask: Optional[float], last: Optional[float]
+) -> Optional[float]:
+    """Pick the best usable price from a quote.
+
+    Prefers the bid/ask midpoint when both sides exist (a live, two-sided
+    quote), falls back to whichever single side is present, then to the last
+    trade. Returns ``None`` when nothing usable exists — a market that has
+    never traded and has no resting quote has *no price*, which is distinct
+    from a real ``0.0``. The last trade is used only as a last resort because
+    it can be stale, or ``0`` for a market that never traded.
+    """
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2.0
+    if bid is not None:
+        return bid
+    if ask is not None:
+        return ask
+    return last
+
+
 def normalize_market(
     raw: dict, *, order_book: Optional[OrderBook] = None
 ) -> Market:
     """Normalize a Kalshi market object into a :class:`Market`.
 
-    ``yes_price`` prefers the last trade price, falling back to the bid/ask
-    midpoint. ``no_price`` is derived the same way from the NO quote, falling
-    back to ``1 - yes_price``.
+    ``yes_price`` prefers the bid/ask midpoint when both sides exist, then a
+    single resting side, then the last trade, and is ``None`` when the market
+    has no usable price (never traded, no resting quote) rather than a
+    misleading ``0``. ``no_price`` is derived the same way from the NO quote,
+    falling back to ``1 - yes_price``.
     """
-    yes_bid = _to_price(raw.get("yes_bid_dollars"))
-    yes_ask = _to_price(raw.get("yes_ask_dollars"))
-    no_bid = _to_price(raw.get("no_bid_dollars"))
-    no_ask = _to_price(raw.get("no_ask_dollars"))
-    last = _to_price(raw.get("last_price_dollars"))
+    yes_bid = _quote_price(raw.get("yes_bid_dollars"))
+    yes_ask = _quote_price(raw.get("yes_ask_dollars"))
+    no_bid = _quote_price(raw.get("no_bid_dollars"))
+    no_ask = _quote_price(raw.get("no_ask_dollars"))
+    last = _quote_price(raw.get("last_price_dollars"))
 
-    def _mid(bid: Optional[float], ask: Optional[float]) -> Optional[float]:
-        if bid is not None and ask is not None:
-            return (bid + ask) / 2.0
-        return bid if bid is not None else ask
-
-    yes_price = last if last is not None else _mid(yes_bid, yes_ask)
-    no_price = _mid(no_bid, no_ask)
+    yes_price = _resolve_price(yes_bid, yes_ask, last)
+    no_price = _resolve_price(no_bid, no_ask, None)
     if no_price is None and yes_price is not None:
         no_price = clamp_probability(1.0 - yes_price)
 
@@ -215,27 +247,30 @@ class KalshiClient:
 
         ``series_ticker`` narrows to one Kalshi series. The public API has no
         free-text search param, so ``search`` is applied client-side against
-        the title/subtitle. Without a query we fetch a single ``limit`` page.
-        With one, we page through the open book (bounded by
-        ``_SEARCH_MAX_PAGES``) so matches beyond the first page are found,
-        stopping as soon as ``limit`` matches are collected.
+        the title/subtitle.
+
+        Multivariate/combo "parlay" markets (``KXMVE*`` tickers) are dropped
+        via the documented ``mve_filter=exclude`` param: the open book is
+        otherwise dominated by tens of thousands of $0-volume parlay shards
+        that bury every real market. Because results come back newest-first
+        (not by liquidity), the default (no-search) view pages until it has
+        collected ``limit`` markets that have actually traded (non-zero
+        volume), so the landing view shows real, liquid markets instead of a
+        page of freshly created $0 ones.
         """
         if not search:
-            params: dict[str, Any] = {"limit": limit}
-            if status:
-                params["status"] = status
-            if series_ticker:
-                params["series_ticker"] = series_ticker
-            resp = self._client.get(f"{self.api_base}/markets", params=params)
-            resp.raise_for_status()
-            rows = resp.json().get("markets", [])
-            return [normalize_market(row) for row in rows]
+            return self._list_liquid(
+                limit=limit, status=status, series_ticker=series_ticker
+            )
 
         needle = search.lower()
         matches: list[Market] = []
         cursor: Optional[str] = None
         for _ in range(self._SEARCH_MAX_PAGES):
-            params = {"limit": self._SEARCH_PAGE_SIZE}
+            params: dict[str, Any] = {
+                "limit": self._SEARCH_PAGE_SIZE,
+                "mve_filter": "exclude",
+            }
             if status:
                 params["status"] = status
             if series_ticker:
@@ -259,6 +294,53 @@ class KalshiClient:
         # markets lie past _SEARCH_MAX_PAGES of the open book is missed; raise
         # the page bound or add a Kalshi search endpoint if one ships.
         return matches
+
+    def _list_liquid(
+        self,
+        *,
+        limit: int,
+        status: Optional[str],
+        series_ticker: Optional[str],
+    ) -> list[Market]:
+        """Default view: page the open book for traded (non-parlay) markets.
+
+        Excludes ``KXMVE*`` parlays and keeps only markets with non-zero
+        volume, paging newest-first until ``limit`` are collected or the page
+        bound is hit. If the bound is reached without filling ``limit`` (a
+        quiet book), any non-parlay markets seen are returned as a fallback so
+        the view is never empty.
+        """
+        liquid: list[Market] = []
+        seen: list[Market] = []
+        cursor: Optional[str] = None
+        for _ in range(self._SEARCH_MAX_PAGES):
+            params: dict[str, Any] = {
+                "limit": self._SEARCH_PAGE_SIZE,
+                "mve_filter": "exclude",
+            }
+            if status:
+                params["status"] = status
+            if series_ticker:
+                params["series_ticker"] = series_ticker
+            if cursor:
+                params["cursor"] = cursor
+            resp = self._client.get(f"{self.api_base}/markets", params=params)
+            resp.raise_for_status()
+            body = resp.json()
+            rows = body.get("markets", [])
+            for row in rows:
+                m = normalize_market(row)
+                seen.append(m)
+                if m.volume is not None and m.volume > 0.0:
+                    liquid.append(m)
+                    if len(liquid) >= limit:
+                        return liquid
+            cursor = body.get("cursor")
+            if not cursor or not rows:
+                break
+        # Quiet book: nothing with volume within the page bound. Fall back to
+        # the non-parlay markets we did see so the view is never blank.
+        return (liquid or seen)[:limit]
 
     def get_market(self, ticker: str) -> Market:
         """Fetch a single market's metadata by ticker (no order book)."""

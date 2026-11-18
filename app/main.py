@@ -44,14 +44,36 @@ def list_markets(
 ) -> JSONResponse:
     if provider is not None and provider not in _PROVIDERS:
         raise HTTPException(status_code=422, detail="provider must be 'polymarket' or 'kalshi'")
-    markets = adapter.get_data_layer().search_markets(q, provider=provider, limit=limit)
-    return JSONResponse({"markets": markets, "count": len(markets)})
+    data = adapter.get_data_layer()
+    # Use the warning-aware search so a provider outage surfaces instead of
+    # being swallowed into an empty "no markets match". Both the real and the
+    # mock data layers implement it.
+    result = data.search_markets_result(q, provider=provider, limit=limit)
+    markets = result["markets"]
+    warnings = result.get("warnings", [])
+    # Total provider outage with nothing to show: a 502, not a misleading
+    # empty 200 that reads to the user as "no markets match".
+    if result.get("all_failed") and not markets:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "all market-data providers are currently unavailable",
+                "warnings": warnings,
+            },
+        )
+    # `markets` and `count` stay unchanged; `warnings` is additive.
+    body: dict = {"markets": markets, "count": len(markets)}
+    if warnings:
+        body["warnings"] = warnings
+    return JSONResponse(body)
 
 
 @app.get("/api/market/{market_id}")
 def get_market(market_id: str) -> JSONResponse:
     try:
         market = adapter.get_data_layer().get_market(market_id)
+    except adapter.ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"market '{market_id}' not found")
     return JSONResponse(market)
@@ -83,11 +105,23 @@ def get_derivative(
         raise HTTPException(status_code=422, detail="side must be 'long' or 'short'")
     try:
         market = adapter.get_data_layer().get_market(market_id)
+    except adapter.ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"market '{market_id}' not found")
 
+    yes_price = market.get("yes_price")
+    if yes_price is None:
+        # The market exists but has no usable YES price yet (never traded, no
+        # resting quote). Pricing a derivative off it would be meaningless, so
+        # say so clearly instead of crashing on float(None).
+        raise HTTPException(
+            status_code=422,
+            detail=f"market '{market_id}' has no YES price yet; cannot price a derivative",
+        )
+
     bundle = adapter.get_engine().bundle(
-        yes_price=float(market["yes_price"]),
+        yes_price=float(yes_price),
         strike=float(strike),
         option_type=option_type,
         side=side,
