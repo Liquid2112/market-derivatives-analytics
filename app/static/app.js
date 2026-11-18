@@ -220,33 +220,53 @@ const fmtMoney = (x) =>
 
 function renderSummaryStrip(b) {
   // Use the API's own side-signed scalars, not a re-derivation.
-  const tile = (label, val, cls, sub) =>
-    `<div class="sum-tile">
+  // 'You pay' and 'Chance of profit' are the headline numbers (hero tiles).
+  const tile = (label, val, cls, sub, hero) =>
+    `<div class="sum-tile${hero ? " hero" : ""}">
        <div class="sum-label">${label}</div>
        <div class="sum-val ${cls || ""}">${val}</div>
        ${sub ? `<div class="sum-sub">${sub}</div>` : ""}
      </div>`;
 
   el("summaryStrip").innerHTML =
-    tile("You pay", fmtMoney(b.premium), "", "premium, per $1 contract") +
+    tile("You pay", fmtMoney(b.premium), "accent", "premium, per $1 contract", true) +
+    tile("Chance of profit", fmtPct(b.prob_of_profit), "", "model-based", true) +
     tile("Max you'd make", fmtMoney(b.max_gain), "pos", "per $1 contract") +
     tile("Max you'd lose", fmtMoney(b.max_loss), b.max_loss < 0 ? "neg" : "", "per $1 contract") +
-    tile("Break-even", fmtPct(b.break_even), "", "YES probability") +
-    tile("Chance of profit", fmtPct(b.prob_of_profit), "accent", "model-based");
+    tile("Break-even", fmtPct(b.break_even), "", "YES probability");
 
   el("summaryNote").textContent =
     "“You pay”, “max make” and “max lose” are exact from the payoff — model-free. " +
     "“Chance of profit” is model-based (Bachelier), so treat it as a modeled estimate, not odds.";
 }
 
+/* ---------- Chart.js global styling (Inter, muted grid, no borders) ---------- */
+function configureCharts() {
+  if (typeof Chart === "undefined") return;
+  Chart.defaults.font.family =
+    '"Inter var", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  Chart.defaults.font.size = 11;
+  Chart.defaults.color = COLORS.dim;
+  Chart.defaults.animation = reduceMotion ? false : { duration: 200 };
+  Chart.defaults.plugins.legend.display = false;
+  Chart.defaults.plugins.tooltip.backgroundColor = COLORS.navy;
+  Chart.defaults.plugins.tooltip.titleColor = "#fff";
+  Chart.defaults.plugins.tooltip.bodyColor = "#e7edf8";
+  Chart.defaults.plugins.tooltip.borderColor = "rgba(255,255,255,0.15)";
+  Chart.defaults.plugins.tooltip.borderWidth = 1;
+  Chart.defaults.plugins.tooltip.padding = 8;
+  Chart.defaults.plugins.tooltip.cornerRadius = 8;
+  Chart.defaults.plugins.tooltip.displayColors = false;
+}
+
 /* ---------- Chart.js helpers ---------- */
 const baseAxis = {
-  grid: { color: COLORS.grid, drawTicks: false },
+  grid: { color: COLORS.grid, drawTicks: false, lineWidth: 1 },
   border: { display: false },
   ticks: { color: COLORS.dim, font: { size: 10 } },
 };
 
-function lineChart(canvasId, labels, data, color, fillZero, compact, guides) {
+function lineChart(canvasId, labels, data, color, fillZero, compact, guides, moneyY) {
   if (charts[canvasId]) charts[canvasId].destroy();
   const ctx = el(canvasId).getContext("2d");
   charts[canvasId] = new Chart(ctx, {
@@ -255,16 +275,33 @@ function lineChart(canvasId, labels, data, color, fillZero, compact, guides) {
       labels,
       datasets: [{
         data, borderColor: color, borderWidth: 2,
-        pointRadius: 0, tension: 0.15,
+        pointRadius: 0, pointHoverRadius: 4, pointHoverBackgroundColor: color,
+        tension: 0.15,
         fill: fillZero
-          ? { target: "origin", above: "rgba(11,143,78,0.10)", below: "rgba(194,59,59,0.10)" }
+          ? { target: "origin", above: "rgba(11,143,78,0.12)", below: "rgba(194,59,59,0.12)" }
           : false,
       }],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       animation: reduceMotion ? false : { duration: 200 },
-      plugins: { legend: { display: false }, tooltip: { enabled: true, intersect: false, mode: "index" } },
+      interaction: { intersect: false, mode: "index" },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          enabled: true, intersect: false, mode: "index",
+          callbacks: {
+            title: (items) => (items.length ? `YES ${items[0].label}%` : ""),
+            label: (item) => {
+              const v = item.parsed.y;
+              if (v == null) return "";
+              return moneyY
+                ? (v < 0 ? "−$" : "$") + Math.abs(v).toFixed(3) + " per $1"
+                : Number(v).toFixed(3);
+            },
+          },
+        },
+      },
       scales: {
         x: {
           ...baseAxis,
@@ -291,7 +328,7 @@ function renderPayoff(b) {
     underlying: b.underlying_prob,
     maxGain: b.max_gain,
     maxLoss: b.max_loss,
-  });
+  }, true);
 }
 
 /* Draw the break-even vertical line, the current-underlying marker, and the
@@ -306,7 +343,7 @@ const payoffGuides = {
     const xAt = (p) => scales.x.getPixelForValue(Math.round(p * 100));
     const yAt = (v) => scales.y.getPixelForValue(v);
     ctx.save();
-    ctx.font = "10px -apple-system, Segoe UI, sans-serif";
+    ctx.font = '10px "Inter var", "Inter", -apple-system, "Segoe UI", sans-serif';
 
     // horizontal guides for max gain / max loss
     const hline = (val, color, label) => {
@@ -398,6 +435,7 @@ function escapeHtml(s) {
 
 /* ---------- init ---------- */
 function init() {
+  configureCharts();
   el("searchInput").addEventListener("input", onSearchInput);
 
   document.querySelectorAll(".prov").forEach((b) =>
