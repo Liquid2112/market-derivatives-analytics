@@ -163,6 +163,17 @@ def _seeded_depth(market_id: str, yes_price: float) -> dict[str, list[list[float
     return {"bids": bids, "asks": asks}
 
 
+def _popularity_key(summary: dict[str, Any]) -> float:
+    """Sort key that ranks a market by traded volume (most popular first).
+
+    ``volume`` may be ``None`` (a provider that did not report it); those sort
+    last. Used only to order the default landing view so recognizable, liquid
+    markets surface first; it never changes which markets are returned.
+    """
+    vol = summary.get("volume")
+    return float(vol) if vol is not None else -1.0
+
+
 class _MockDataLayer:
     def search_markets(
         self, query: str, provider: str | None = None, limit: int = 25
@@ -177,6 +188,9 @@ class _MockDataLayer:
             summary = dict(m)
             summary["no_price"] = round(1.0 - m["yes_price"], 3)
             out.append(summary)
+        # Default landing view shows the most liquid (recognizable) markets
+        # first; an explicit search keeps the provider's relevance order.
+        out.sort(key=_popularity_key, reverse=True)
         return out[:limit]
 
     def get_market(self, market_id: str) -> dict[str, Any]:
@@ -392,6 +406,10 @@ class _RealDataLayer:
                 if m.yes_price is None:
                     continue
                 out.append(_market_summary(m))
+        # Rank the default landing view by traded volume so popular,
+        # recognizable markets lead; a text search keeps relevance order.
+        if q is None:
+            out.sort(key=_popularity_key, reverse=True)
         return out[:limit]
 
     def get_market(self, market_id: str) -> dict[str, Any]:

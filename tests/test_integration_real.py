@@ -108,6 +108,19 @@ def test_real_provider_filter(real_client):
     assert all(m["provider"] == "kalshi" for m in body["markets"])
 
 
+def test_real_default_view_ranked_by_volume_desc(real_client):
+    """The default landing view (no query) is ordered by traded volume across
+    both providers, so popular markets lead regardless of provider fetch order.
+    The fixtures interleave providers whose volumes are out of order, so a pass
+    proves the adapter re-ranked them rather than echoing the fetch order."""
+    markets = real_client.get("/api/markets").json()["markets"]
+    vols = [m["volume"] for m in markets if m["volume"] is not None]
+    assert vols == sorted(vols, reverse=True)
+    # any market missing a volume sorts after every market that reported one
+    reported = [m["volume"] is not None for m in markets]
+    assert reported == sorted(reported, reverse=True)
+
+
 def test_real_get_market_has_live_order_book(real_client):
     mid = real_client.get(
         "/api/markets", params={"provider": "polymarket"}
