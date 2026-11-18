@@ -51,6 +51,28 @@ def test_list_markets_rejects_bad_provider():
     assert r.status_code == 422
 
 
+def test_default_markets_ranked_by_volume_desc():
+    """The default landing view (no query) leads with the most-traded markets,
+    so recognizable, liquid markets surface first instead of an arbitrary order.
+    """
+    markets = client.get("/api/markets").json()["markets"]
+    vols = [m["volume"] for m in markets]
+    # every market carries a volume and they are non-increasing (popular first)
+    assert all(v is not None for v in vols)
+    assert vols == sorted(vols, reverse=True)
+    # the single highest-volume mock market is the one on top
+    assert markets[0]["volume"] == max(vols)
+
+
+def test_search_query_not_reordered_by_volume():
+    """A text search is a relevance query, not the default view, so it must not
+    be forced into volume order — it returns the provider's matches as-is."""
+    r = client.get("/api/markets", params={"q": "bitcoin"})
+    assert r.status_code == 200
+    titles = [m["title"].lower() for m in r.json()["markets"]]
+    assert any("bitcoin" in t for t in titles)
+
+
 def test_search_filters_by_query():
     r = client.get("/api/markets", params={"q": "bitcoin"})
     assert r.status_code == 200
