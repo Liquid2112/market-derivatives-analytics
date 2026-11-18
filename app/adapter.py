@@ -30,7 +30,32 @@ import math
 import os
 
 import httpx
-from typing import Any, Protocol
+from typing import Any, Protocol, TypedDict
+
+
+class SearchResult(TypedDict):
+    """Result of a market search that also carries provider-level failures.
+
+    ``markets`` is the summaries collected (possibly empty); ``warnings`` is
+    one ``{provider, message}`` per provider that failed; ``all_failed`` is
+    true only when every requested provider raised.
+    """
+
+    markets: list[dict[str, Any]]
+    warnings: list[dict[str, str]]
+    all_failed: bool
+
+
+class MarketNotFoundError(KeyError):
+    """The requested market genuinely does not exist (maps to HTTP 404)."""
+
+
+class ProviderError(RuntimeError):
+    """An upstream/network failure reaching a provider (maps to HTTP 502)."""
+
+
+class MarketHasNoPriceError(ValueError):
+    """The market exists but has no usable YES price yet (maps to HTTP 422)."""
 
 
 # --------------------------------------------------------------------------
@@ -47,6 +72,18 @@ class DataLayer(Protocol):
         ``provider`` is ``"polymarket"``, ``"kalshi"`` or ``None`` (both).
         Each summary: ``{id, provider, title, yes_price, no_price, volume,
         close_time, category}``.
+        """
+        ...
+
+    def search_markets_result(
+        self, query: str, provider: str | None = None, limit: int = 25
+    ) -> "SearchResult":
+        """Like :meth:`search_markets`, but also reports per-provider failures.
+
+        Returns ``{"markets": [...], "warnings": [{provider, message}, ...],
+        "all_failed": bool}``. ``all_failed`` is true only when every provider
+        that was asked raised (so the API can distinguish an empty-but-healthy
+        result from a total outage).
         """
         ...
 
@@ -198,6 +235,16 @@ class _MockDataLayer:
         # first; an explicit search keeps the provider's relevance order.
         out.sort(key=_popularity_key, reverse=True)
         return out[:limit]
+
+    def search_markets_result(
+        self, query: str, provider: str | None = None, limit: int = 25
+    ) -> SearchResult:
+        # The mock never reaches a network, so it never warns or fails.
+        return {
+            "markets": self.search_markets(query, provider=provider, limit=limit),
+            "warnings": [],
+            "all_failed": False,
+        }
 
     def get_market(self, market_id: str) -> dict[str, Any]:
         for m in _MOCK_MARKETS:
@@ -420,16 +467,57 @@ def _market_summary(market) -> dict[str, Any]:
 # the view degrades to the other provider instead of hanging for ~20s.
 _SEARCH_TIMEOUT = 8.0
 
+# Default time-to-live (seconds) for the per-market fetch cache. A slider
+# scrub fires many /api/derivative calls for the same market; caching the
+# market + its book for a few seconds collapses those into one live fetch.
+# Overridable via MDA_MARKET_CACHE_TTL so it can be tuned/disabled per deploy.
+_DEFAULT_MARKET_TTL = 10.0
+
+
+def _market_cache_ttl() -> float:
+    raw = os.getenv("MDA_MARKET_CACHE_TTL")
+    if raw is None:
+        return _DEFAULT_MARKET_TTL
+    try:
+        return max(0.0, float(raw))
+    except (ValueError, TypeError):
+        return _DEFAULT_MARKET_TTL
+
+
+def _is_not_found(exc: Exception) -> bool:
+    """True when an exception means the market genuinely does not exist.
+
+    A 404 from a provider is a real not-found; any other HTTP status, a
+    transport error (timeout, connection reset), or a malformed-payload
+    ``ValueError``/``KeyError`` is an upstream/network failure, not absence.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 404
+    return False
+
 
 class _RealDataLayer:
     """DataLayer over mdlab's Polymarket + Kalshi read-only clients.
     The clients are injected so tests can pass fixture-backed ``httpx`` clients
     (no network). The default constructor builds live read-only clients.
+
+    ``get_market`` memoizes the (market, book) fetch per composed id for a
+    short TTL so a burst of derivative requests for the same market makes one
+    live fetch, not one per request. The cache is clearable and uses an
+    injectable clock so tests never depend on wall-clock timing or order.
     """
 
-    def __init__(self, polymarket_client=None, kalshi_client=None) -> None:
+    def __init__(
+        self,
+        polymarket_client=None,
+        kalshi_client=None,
+        *,
+        cache_ttl: float | None = None,
+        time_fn=None,
+    ) -> None:
         from mdlab.kalshi import KalshiClient
         from mdlab.polymarket import PolymarketClient
+        import time as _time
 
         # A bounded per-request timeout so one slow provider degrades
         # gracefully (we return what the other gave) instead of the whole
@@ -438,56 +526,116 @@ class _RealDataLayer:
             timeout=_SEARCH_TIMEOUT
         )
         self._kalshi = kalshi_client or KalshiClient(timeout=_SEARCH_TIMEOUT)
+        self._ttl = cache_ttl if cache_ttl is not None else _market_cache_ttl()
+        self._now = time_fn or _time.monotonic
+        # market_id -> (expires_at, summary_dict)
+        self._market_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    def clear_cache(self) -> None:
+        """Drop every cached market fetch (tests and manual refresh)."""
+        self._market_cache.clear()
+
+    def _client_for(self, provider: str):
+        if provider == "polymarket":
+            return self._poly
+        if provider == "kalshi":
+            return self._kalshi
+        raise MarketNotFoundError(provider)
 
     def search_markets(
         self, query: str, provider: str | None = None, limit: int = 25
     ) -> list[dict[str, Any]]:
+        return self.search_markets_result(
+            query, provider=provider, limit=limit
+        )["markets"]
+
+    def search_markets_result(
+        self, query: str, provider: str | None = None, limit: int = 25
+    ) -> SearchResult:
         q = (query or "").strip() or None
         out: list[dict[str, Any]] = []
-        want = {provider} if provider else {"polymarket", "kalshi"}
+        warnings: list[dict[str, str]] = []
+        want = (
+            [provider] if provider else ["polymarket", "kalshi"]
+        )
+        failed = 0
         # Each provider is queried independently: a timeout or error from one
-        # must not blank out results the other returned, so we swallow the
-        # failure per-provider and return what we have.
-        if "polymarket" in want:
-            out.extend(self._safe_list(self._poly, q, limit))
-        if "kalshi" in want:
-            out.extend(self._safe_list(self._kalshi, q, limit))
+        # must not blank out results the other returned, so we capture the
+        # failure per-provider as a warning and keep what the others gave.
+        for name in want:
+            rows, warning = self._safe_list(self._client_for(name), name, q, limit)
+            out.extend(rows)
+            if warning is not None:
+                warnings.append(warning)
+                failed += 1
         # Rank the default landing view by traded volume so popular,
         # recognizable markets lead; a text search keeps relevance order.
         if q is None:
             out.sort(key=_popularity_key, reverse=True)
-        return out[:limit]
+        return {
+            "markets": out[:limit],
+            "warnings": warnings,
+            # Total failure only when every requested provider raised.
+            "all_failed": failed == len(want) and failed > 0,
+        }
 
     @staticmethod
-    def _safe_list(client, q: str | None, limit: int) -> list[dict[str, Any]]:
-        """Fetch + summarize one provider, returning [] if it fails.
+    def _safe_list(
+        client, provider: str, q: str | None, limit: int
+    ) -> tuple[list[dict[str, Any]], dict[str, str] | None]:
+        """Fetch + summarize one provider.
 
-        A provider outage, timeout, or malformed response degrades the view to
-        the other provider rather than failing the whole request.
+        Returns ``(summaries, None)`` on success or ``([], {provider, message})``
+        when the provider errored, so the caller can surface the outage instead
+        of silently dropping it.
         """
         try:
             markets = client.list_markets(limit=limit, search=q)
-        except (httpx.HTTPError, ValueError, KeyError):
-            return []
-        return [
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            return [], {
+                "provider": provider,
+                "message": f"{provider} is temporarily unavailable ({type(exc).__name__}).",
+            }
+        summaries = [
             _market_summary(m) for m in markets if m.yes_price is not None
         ]
+        return summaries, None
 
     def get_market(self, market_id: str) -> dict[str, Any]:
+        """Fetch one market + its book, memoized per id for ``self._ttl`` sec.
+
+        Raises :class:`MarketNotFoundError` only when the market genuinely does
+        not exist (a provider 404), and :class:`ProviderError` for an upstream
+        or network failure, so the API can map them to 404 vs 502 instead of
+        collapsing every failure into a 404.
+        """
+        now = self._now()
+        hit = self._market_cache.get(market_id)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+
         provider, native = _split_id(market_id)
-        if provider == "polymarket":
-            client = self._poly
-        elif provider == "kalshi":
-            client = self._kalshi
-        else:
-            raise KeyError(market_id)
+        client = self._client_for(provider)
         try:
             market = client.get_market(native)
-            book = client.get_order_book(native)
-        except Exception as exc:  # network / lookup failure -> not found
-            raise KeyError(market_id) from exc
+            # Polymarket's order-book fetch would otherwise re-fetch the market
+            # metadata just to read the YES token id; reuse the payload we just
+            # fetched so one derivative request = one market fetch + one book
+            # fetch, not two market fetches. Kalshi's book endpoint is direct.
+            if provider == "polymarket":
+                book = client.get_order_book(native, raw=market.raw)
+            else:
+                book = client.get_order_book(native)
+        except Exception as exc:
+            if _is_not_found(exc):
+                raise MarketNotFoundError(market_id) from exc
+            raise ProviderError(
+                f"could not reach {provider} for market '{native}'"
+            ) from exc
         summary = _market_summary(market)
         summary["order_book"] = _book_to_levels(book)
+        if self._ttl > 0:
+            self._market_cache[market_id] = (now + self._ttl, summary)
         return summary
 
 

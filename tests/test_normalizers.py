@@ -127,6 +127,40 @@ def test_kalshi_empty_book_is_valid():
     assert book.mid_price is None
 
 
+# ------------------------------------------------- Kalshi price source (fix 14)
+
+
+def test_kalshi_price_prefers_bid_ask_mid_over_last():
+    """The YES price is the bid/ask midpoint when both sides exist, not the
+    last trade (which can be stale). The real fixture has last=0.21 but a
+    0.21/0.81 quote, so a correct price is the 0.51 mid, not 0.21."""
+    raw = _load("kalshi_market.json")["market"]
+    market = kalshi.normalize_market(raw)
+    assert market.yes_price == pytest.approx(0.51, abs=1e-6)
+
+
+def test_kalshi_price_falls_back_to_single_side_then_last():
+    # only a YES bid -> that bid is the price
+    only_bid = kalshi.normalize_market(
+        {"ticker": "A", "yes_bid_dollars": "0.40", "last_price_dollars": "0.90"}
+    )
+    assert only_bid.yes_price == pytest.approx(0.40)
+    # no quote at all, only a last trade -> fall back to last
+    only_last = kalshi.normalize_market(
+        {"ticker": "B", "last_price_dollars": "0.33"}
+    )
+    assert only_last.yes_price == pytest.approx(0.33)
+
+
+def test_kalshi_never_traded_market_has_no_price_not_zero():
+    """A market with 0.00 bid/ask and 0.00 last has never traded; its price is
+    None (no price), never a misleading 0.0."""
+    raw = _load("kalshi_market_no_price.json")["market"]
+    market = kalshi.normalize_market(raw)
+    assert market.yes_price is None
+    assert market.no_price is None
+
+
 # -------------------------------------------------------------- shared schema
 
 
