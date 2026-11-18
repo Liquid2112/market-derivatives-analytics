@@ -19,6 +19,9 @@ const state = {
 };
 
 const charts = {};
+// Test hook: expose the live chart instances so the browser regression test
+// can introspect config/guides. Harmless in production (read-only reference).
+if (typeof window !== "undefined") window.__charts = charts;
 const reduceMotion =
   window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -36,7 +39,29 @@ const COLORS = {
 
 const el = (id) => document.getElementById(id);
 const fmtPct = (x) => (x == null ? "—" : (x * 100).toFixed(1) + "%");
-const fmtNum = (x, d = 4) => (x == null ? "—" : Number(x).toFixed(d));
+
+/* Normalize -0 (and values that round to zero at the chosen precision) so the
+   UI never prints a misleading "-0.00" / "−$0.000". */
+const noNegZero = (x) => (x === 0 ? 0 : x);
+
+/* Adaptive precision: show a fixed number of decimals, but if the value is
+   small-but-non-zero and would round to all-zeros at that precision, widen the
+   decimals until the first significant digit shows (capped) so a real non-zero
+   number never reads as 0.00. Zero stays "0". */
+function adaptiveFixed(x, baseDecimals) {
+  if (x == null || !Number.isFinite(Number(x))) return null;
+  const v = noNegZero(Number(x));
+  if (v === 0) return (0).toFixed(baseDecimals);
+  let d = baseDecimals;
+  // widen until the rounded value is non-zero, up to 8 decimals
+  while (d < 8 && Math.abs(Number(v.toFixed(d))) === 0) d++;
+  return v.toFixed(d);
+}
+
+const fmtNum = (x, d = 4) => {
+  const s = adaptiveFixed(x, d);
+  return s == null ? "—" : s;
+};
 const fmtVol = (v) => {
   if (v == null) return "";
   if (v >= 1e6) return "$" + (v / 1e6).toFixed(1) + "M";
@@ -44,8 +69,8 @@ const fmtVol = (v) => {
   return "$" + Number(v).toFixed(0);
 };
 
-async function api(path) {
-  const r = await fetch(path);
+async function api(path, signal) {
+  const r = await fetch(path, signal ? { signal } : undefined);
   if (!r.ok) {
     let detail = r.statusText;
     try { detail = (await r.json()).detail || detail; } catch (_) {}
@@ -53,6 +78,18 @@ async function api(path) {
   }
   return r.json();
 }
+
+/* Per-flow AbortControllers so a newer request cancels the one in flight and a
+   late/aborted response can never overwrite fresher data. Aborted requests are
+   swallowed silently (that is the expected outcome, not an error). */
+const inflight = { markets: null, market: null, derivative: null };
+function freshSignal(flow) {
+  if (inflight[flow]) inflight[flow].abort();
+  const ctrl = new AbortController();
+  inflight[flow] = ctrl;
+  return ctrl.signal;
+}
+const isAbort = (e) => e && (e.name === "AbortError" || e.code === 20);
 
 /* ---------- backend status chip ---------- */
 async function loadHealth() {
@@ -82,10 +119,11 @@ async function loadMarkets() {
   if (q) params.set("q", q);
   if (state.provider) params.set("provider", state.provider);
   try {
-    const data = await api("/api/markets?" + params.toString());
+    const data = await api("/api/markets?" + params.toString(), freshSignal("markets"));
     state.markets = data.markets;
     renderMarketList();
   } catch (e) {
+    if (isAbort(e)) return;  // superseded by a newer search; ignore silently
     el("marketList").innerHTML = `<li class="placeholder">Error: ${escapeHtml(e.message)}</li>`;
   }
 }
@@ -100,6 +138,7 @@ function renderMarketList() {
   for (const m of state.markets) {
     const li = document.createElement("li");
     li.className = "market-item" + (state.selected && state.selected.id === m.id ? " selected" : "");
+    li.title = m.title;  // full title on hover; the visible title is clamped
     const vol = m.volume != null ? `<span class="mi-vol">${fmtVol(m.volume)}</span>` : "";
     li.innerHTML = `
       <div class="mi-title">${escapeHtml(m.title)}</div>
@@ -115,8 +154,12 @@ function renderMarketList() {
 
 /* ---------- select a market -> show the single-position card ---------- */
 async function selectMarket(id) {
+  // A new selection cancels any in-flight market load and the previous market's
+  // derivative request, so a slow older response can't repaint a stale market.
+  const signal = freshSignal("market");
+  if (inflight.derivative) inflight.derivative.abort();
   try {
-    state.selected = await api("/api/market/" + encodeURIComponent(id));
+    state.selected = await api("/api/market/" + encodeURIComponent(id), signal);
     renderMarketList();
     el("emptyState").hidden = true;
     el("positionBody").hidden = false;
@@ -124,6 +167,7 @@ async function selectMarket(id) {
     renderOrderBook();
     await refreshDerivative();
   } catch (e) {
+    if (isAbort(e)) return;  // superseded by a newer selection; ignore silently
     el("emptyState").hidden = false;
     el("emptyState").innerHTML = `<p class="placeholder">Error: ${escapeHtml(e.message)}</p>`;
     el("positionBody").hidden = true;
@@ -202,7 +246,7 @@ async function refreshDerivative() {
     tau: String(state.tau),
   });
   try {
-    const b = await api(`/api/derivative/${encodeURIComponent(state.selected.id)}?` + params.toString());
+    const b = await api(`/api/derivative/${encodeURIComponent(state.selected.id)}?` + params.toString(), freshSignal("derivative"));
     state.bundle = b;
     updateChosenBadge(b);
     renderSummaryStrip(b);
@@ -210,13 +254,20 @@ async function refreshDerivative() {
     renderGreeks(b);
     renderProbScrub();
   } catch (e) {
+    if (isAbort(e)) return;  // superseded by a newer builder change; ignore silently
     el("chartNote").textContent = "Error: " + e.message;
   }
 }
 
-/* Money is $ per $1 contract; always carry the sign so a loss reads as negative. */
-const fmtMoney = (x) =>
-  x == null ? "—" : (x < 0 ? "−$" : "$") + Math.abs(Number(x)).toFixed(3);
+/* Money is $ per $1 contract; always carry the sign so a loss reads as negative.
+   Adaptive precision keeps a tiny non-zero value from collapsing to $0.000, and
+   negative zero is normalized so "max loss" never shows "−$0.000". */
+const fmtMoney = (x) => {
+  if (x == null || !Number.isFinite(Number(x))) return "—";
+  const v = noNegZero(Number(x));
+  const mag = adaptiveFixed(Math.abs(v), 3);
+  return (v < 0 ? "−$" : "$") + mag;
+};
 
 function renderSummaryStrip(b) {
   // Use the API's own side-signed scalars, not a re-derivation.
@@ -247,7 +298,11 @@ function configureCharts() {
     '"Inter var", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
   Chart.defaults.font.size = 11;
   Chart.defaults.color = COLORS.dim;
-  Chart.defaults.animation = reduceMotion ? false : { duration: 200 };
+  // Keep Chart.js's own animation config object intact — replacing it wholesale
+  // (e.g. with `false`) drops the internal fields Chart.js expects and throws
+  // "this._fn is not a function", blanking every chart. Only tune duration, and
+  // honour reduced motion by zeroing the duration rather than nulling the object.
+  Chart.defaults.animation.duration = reduceMotion ? 0 : 200;
   Chart.defaults.plugins.legend.display = false;
   Chart.defaults.plugins.tooltip.backgroundColor = COLORS.navy;
   Chart.defaults.plugins.tooltip.titleColor = "#fff";
@@ -284,10 +339,16 @@ function lineChart(canvasId, labels, data, color, fillZero, compact, guides, mon
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      animation: reduceMotion ? false : { duration: 200 },
+      animation: { duration: reduceMotion ? 0 : 200 },
       interaction: { intersect: false, mode: "index" },
       plugins: {
         legend: { display: false },
+        // Pass the guide values through the plugin options so the plugin reads
+        // them from its `opts` argument on every draw (including the first).
+        // Attaching them to the chart after construction meant the first draw
+        // had no guides and the break-even / current-price / max lines never
+        // appeared.
+        payoffGuides: guides || undefined,
         tooltip: {
           enabled: true, intersect: false, mode: "index",
           callbacks: {
@@ -295,9 +356,7 @@ function lineChart(canvasId, labels, data, color, fillZero, compact, guides, mon
             label: (item) => {
               const v = item.parsed.y;
               if (v == null) return "";
-              return moneyY
-                ? (v < 0 ? "−$" : "$") + Math.abs(v).toFixed(3) + " per $1"
-                : Number(v).toFixed(3);
+              return moneyY ? fmtMoney(v) + " per $1" : fmtNum(v, 3);
             },
           },
         },
@@ -307,8 +366,25 @@ function lineChart(canvasId, labels, data, color, fillZero, compact, guides, mon
           ...baseAxis,
           ticks: {
             ...baseAxis.ticks,
-            maxTicksLimit: compact ? 3 : 6,
-            callback: (v, i) => (i % (compact ? 50 : 20) === 0 ? labels[i] + "%" : ""),
+            autoSkip: false,
+            // Label every tick we keep. `afterBuildTicks` below pins the ticks
+            // to round percentages, so each one gets a "NN%" label — the old
+            // `i % 20` test keyed off the post-skip tick index (not a data
+            // index) and left every chart showing a single "0%".
+            callback(value) {
+              const pct = Number(this.getLabelForValue(value));
+              return Number.isFinite(pct) ? pct + "%" : "";
+            },
+          },
+          // Pin ticks to round percentages: 0/20/40/60/80/100 (or 0/50/100 for
+          // the compact Greek charts). labels are "0".."100", so the tick value
+          // is the data index == the percentage.
+          afterBuildTicks(axis) {
+            const wanted = compact ? [0, 50, 100] : [0, 20, 40, 60, 80, 100];
+            const maxIdx = labels.length - 1;  // 100 for the 0..100 grid
+            axis.ticks = wanted
+              .filter((p) => p <= maxIdx)
+              .map((p) => ({ value: p }));
           },
         },
         y: { ...baseAxis, ticks: { ...baseAxis.ticks, maxTicksLimit: compact ? 4 : 6 } },
@@ -316,7 +392,6 @@ function lineChart(canvasId, labels, data, color, fillZero, compact, guides, mon
     },
     plugins: guides ? [payoffGuides] : [],
   });
-  if (guides) charts[canvasId].$guides = guides;
   return charts[canvasId];
 }
 
@@ -337,8 +412,8 @@ function renderPayoff(b) {
 const payoffGuides = {
   id: "payoffGuides",
   afterDatasetsDraw(chart, _args, opts) {
-    const g = chart.$guides;
-    if (!g) return;
+    const g = opts;
+    if (!g || g.breakEven == null) return;
     const { ctx, chartArea: area, scales } = chart;
     const xAt = (p) => scales.x.getPixelForValue(Math.round(p * 100));
     const yAt = (v) => scales.y.getPixelForValue(v);
