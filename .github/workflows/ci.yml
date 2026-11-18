@@ -24,5 +24,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Run the full suite (engine + data layer + API + integration)
+      - name: Install Playwright Chromium (for the browser regression test)
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run the full suite (engine + data layer + API + browser regression)
         run: python -m pytest -q

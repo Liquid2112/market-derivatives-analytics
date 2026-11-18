@@ -1,0 +1,33 @@
+/* Inter, self-hosted (no CDN). Only the normal-weight variable font is
+   vendored — the UI never uses italics. The legacy "Inter var" and the
+   plain "Inter" family names are aliased to the same file so the existing
+   font-family stacks in styles.css / app.js resolve locally.
+
+   Inter is licensed under the SIL Open Font License, Version 1.1; the full
+   licence text is in OFL.txt alongside this file. */
+
+@font-face {
+  font-family: InterVariable;
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('InterVariable.woff2') format('woff2');
+}
+
+/* legacy name used by the app's font stacks */
+@font-face {
+  font-family: 'Inter var';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('InterVariable.woff2') format('woff2');
+}
+
+/* plain "Inter" family name (the stack's non-variable fallback) */
+@font-face {
+  font-family: Inter;
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('InterVariable.woff2') format('woff2');
+}

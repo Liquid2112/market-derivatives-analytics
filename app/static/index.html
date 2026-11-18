@@ -5,10 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Market Derivatives Analytics</title>
   <meta name="description" content="Read-only analytics for prediction markets: order books, synthetic options, payoff and Greeks. Not trading, not financial advice." />
-  <link rel="preconnect" href="https://rsms.me/" crossorigin />
-  <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
-  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
-  <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- Self-hosted assets only: no CDN requests, so offline / mock mode works
+       with no external network. Inter (OFL) and Chart.js 4.4.1 are vendored
+       under /static/vendor/. -->
+  <link rel="stylesheet" href="/static/vendor/inter/inter.css" />
+  <script defer src="/static/vendor/chartjs/chart.umd.min.js"></script>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -155,7 +156,7 @@
             <div class="greek-grid">
               <div class="greek-cell">
                 <div class="greek-cell-head"><span class="gc-name">Delta</span><span class="gc-val" id="gvDelta">—</span></div>
-                <p class="gc-gloss">Value change per +1% YES probability.</p>
+                <p class="gc-gloss">Value change per 1.00 change in YES probability (the full 0→1 range).</p>
                 <div class="greek-canvas-wrap"><canvas id="deltaChart"></canvas></div>
               </div>
               <div class="greek-cell">

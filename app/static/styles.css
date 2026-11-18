@@ -167,7 +167,15 @@ html, body {
 }
 .market-item:hover { border-color: var(--ktp-blue-line); background: var(--surface-2); }
 .market-item.selected { border-color: var(--ktp-blue); box-shadow: 0 0 0 2px var(--ktp-ring-2); background: var(--surface); }
-.market-item .mi-title { font-size: 13.5px; font-weight: 600; line-height: 1.35; color: var(--ink); }
+.market-item .mi-title {
+  font-size: 13.5px; font-weight: 600; line-height: 1.35; color: var(--ink);
+  /* truncate long titles (e.g. verbose Kalshi tickers) to two lines with an
+     ellipsis; the full title is available via the element's title tooltip. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .market-item .mi-meta {
   display: flex; align-items: center; gap: 8px; margin-top: 8px;
   font-size: 12px; color: var(--ink-faint);
@@ -199,6 +207,9 @@ html, body {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   text-align: center; padding: 40px 32px; gap: 10px;
 }
+/* The empty state is toggled with the `hidden` attribute from JS; .empty-state's
+   own `display:flex` would otherwise override `hidden`, so make `hidden` win. */
+.empty-state[hidden] { display: none; }
 .empty-art {
   width: 64px; height: 64px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
@@ -376,7 +387,11 @@ input[type="range"] {
     padding: 14px;
   }
   .sidebar {
-    max-height: 46vh;
+    /* Give the list a usable height at narrow widths (e.g. a 894px Chrome side
+       panel) so several market rows are always visible, not just 1–2. A vh cap
+       alone collapsed it to ~140px on short viewports. */
+    height: 42vh;
+    min-height: 320px;
     margin-bottom: 14px;
   }
   .workspace { overflow: visible; }
