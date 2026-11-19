@@ -239,6 +239,31 @@ def test_full_ui_regression(server, browser):
             assert len(labels) >= 2, f"{cid} x-axis shows only {labels}"
 
         # --- item 5: a small non-zero Greek is not shown as 0.00 ---
+        # At the default "held to resolution" horizon (tau = 1) the premium is the
+        # exact scaled-binary value, which is linear in the probability, so gamma
+        # and theta are genuinely 0 there (the correct display, not a bug). The
+        # "not mis-rendered as 0.00" check targets a genuinely non-zero Greek, so
+        # first move the time-to-resolution slider to a modeled horizon (tau < 1)
+        # where gamma/vega are non-zero, then assert the formatting.
+        page.eval_on_selector(
+            "#tauRange",
+            """(el) => {
+                el.value = '0.5';
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }""",
+        )
+        # Wait until the derivative has refreshed at the new horizon: gamma is a
+        # pure-model Greek, so it becomes non-zero once tau < 1 takes effect.
+        page.wait_for_function(
+            """() => {
+                const t = document.querySelector('#gvGamma');
+                if (!t) return false;
+                const s = t.textContent.trim();
+                return s && !['0.00','-0.00','\u22120.00','0.000','-0.000'].includes(s);
+            }""",
+            timeout=15000,
+        )
         for sel in ("#gvDelta", "#gvGamma", "#gvVega", "#gvTheta"):
             txt = page.locator(sel).inner_text().strip()
             assert txt not in ("0.00", "-0.00", "−0.00", "0.000", "-0.000"), \
