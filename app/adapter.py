@@ -26,7 +26,6 @@ the UI charts consume. All adapting happens here — never in the callers.
 from __future__ import annotations
 
 import hashlib
-import math
 import os
 
 import httpx
@@ -108,18 +107,25 @@ class Engine(Protocol):
         side: str,
         premium: float | None = None,
         tau: float = 1.0,
+        order_book: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return a JSON-serializable analytics bundle for a synthetic option.
 
         ``yes_price`` / ``strike`` are probabilities in ``[0, 1]``.
         ``option_type`` is ``"call"`` or ``"put"``; ``side`` is ``"long"`` or
-        ``"short"``. ``tau`` in ``(0, 1]`` is the modeled time-to-resolution
-        (a resolution-horizon analogy, not a listed expiry); it scales the model
-        dispersion as ``sigma * sqrt(tau)`` and so drives the model-based Greeks
-        and probability-of-profit. Returns: ``{premium, break_even,
-        implied_prob, prob_of_profit, max_gain, max_loss, payoff_curve:
-        [{p, payoff}, ...], greeks: {delta, gamma, theta, vega}, greek_curves:
-        {delta: [{p, value}], gamma: [...], theta: [...], vega: [...]}}``.
+        ``"short"``. ``tau`` in ``(0, 1]`` is the modeled time-to-resolution: at
+        ``tau == 1`` the option is held to resolution and ``premium`` is the exact
+        model-free value (``call = p*(1-K)``, ``put = (1-p)*K``); below 1 the
+        expiry is before resolution and the premium is the logit-normal model
+        value (MODEL.md). ``order_book`` (``{bids: [[price, size], ...], asks:
+        [...]}``), when present, sets the implied probability from the top-of-book
+        mid and widens the model dispersion by the half-spread. Returns:
+        ``{premium, pricing_basis, break_even, implied_prob, prob_of_profit,
+        max_gain, max_loss, payoff_curve: [{p, payoff}, ...], greeks: {delta,
+        gamma, theta, vega}, greek_curves: {delta: [{p, value}], gamma: [...],
+        theta: [...], vega: [...]}}``. ``break_even`` is a YES probability in
+        ``[0, 1]`` or ``null`` when no break-even exists in range (never clamped).
+        ``pricing_basis`` is ``"held_to_resolution"`` (exact) or ``"model"``.
         """
         ...
 
@@ -257,39 +263,126 @@ class _MockDataLayer:
 
 
 # --------------------------------------------------------------------------
-# Mock engine — a self-contained, documented options model over probabilities.
+# Engine adapter — one source of truth.
 # --------------------------------------------------------------------------
-# shortcut: this mock prices a synthetic option whose underlying is the YES
-# probability p in [0,1], treating p like a tradeable price with intrinsic
-# payoff max(p-K,0)/max(K-p,0). It uses a Bachelier (normal) model for a
-# smooth premium/Greeks surface, which is a reasonable choice for a bounded
-# [0,1] underlying. Swap for the real engine (MODEL.md) at final wiring.
-_SIGMA = 0.18   # volatility of the probability underlying
-_TAU = 0.25     # time to expiry (years) used for the smooth model
+# Both the real and the mock engine reshape the SAME ``derivatives_engine.analyze``
+# bundle into the ``{p, payoff}`` / ``{p, value}`` shapes the UI charts consume.
+# There is no second pricing model: the mock path differs only in where the
+# market data comes from (deterministic fixtures vs. live providers), never in the
+# math, so the two can never diverge. See MODEL.md for the model itself.
 
 
-def _norm_pdf(x: float) -> float:
-    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+def _book_from_levels(order_book: dict[str, Any] | None):
+    """Dict ``{bids, asks}`` of ``[price, size]`` -> engine ``OrderBook`` or None.
+
+    Tolerates a missing, empty, or one-sided book (the engine falls back to the
+    bare YES price when a mid/spread cannot be formed).
+    """
+    from derivatives_engine import OrderBook, OrderLevel
+
+    if not order_book:
+        return None
+    bids = order_book.get("bids") or []
+    asks = order_book.get("asks") or []
+    if not bids and not asks:
+        return None
+    return OrderBook(
+        bids=[OrderLevel(float(px), float(sz)) for px, sz in bids],
+        asks=[OrderLevel(float(px), float(sz)) for px, sz in asks],
+    )
 
 
-def _norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+def _build_bundle(
+    yes_price: float,
+    strike: float,
+    option_type: str,
+    side: str,
+    tau: float = 1.0,
+    order_book: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Reshape ``derivatives_engine.analyze`` into the UI's bundle dict.
+
+    The single place the API's engine bundle is built, shared by the real and the
+    mock engine so their output cannot diverge. The engine already side-signs the
+    payoff curve (it receives ``side``); the point and curve Greeks are returned
+    long-side, so we apply the side sign to them here (matching the UI).
+    """
+    from derivatives_engine import analyze
+
+    option_type = option_type.lower()
+    side = side.lower()
+    if option_type not in ("call", "put"):
+        raise ValueError("option_type must be 'call' or 'put'")
+    if side not in ("long", "short"):
+        raise ValueError("side must be 'long' or 'short'")
+
+    p = _clamp01(yes_price)
+    k = _clamp01(strike)
+    book = _book_from_levels(order_book)
+    result = analyze(
+        p=p,
+        strike=k,
+        option_type=option_type,
+        side=side,
+        tau=tau,
+        book=book,
+        num_points=101,
+    )
+    sign = 1.0 if side == "long" else -1.0
+
+    pc = result["payoff_curve"]
+    payoff_curve = [
+        {"p": round(xp, 3), "payoff": round(py, 5)}
+        for xp, py in zip(pc["x"], pc["payoff"])
+    ]
+
+    gc = result["greek_curve"]
+    ps = gc["p"]
+    greek_curves = {
+        name: [
+            {"p": round(ps[i], 3), "value": round(sign * gc[name][i], 6)}
+            for i in range(len(ps))
+        ]
+        for name in ("delta", "gamma", "theta", "vega")
+    }
+
+    g = result["greeks"]  # long-side point Greeks
+    be_list = result["break_even"]
+    # A break-even that does not exist in [0, 1] is reported as null, never
+    # clamped to a boundary (a clamped value would be a break-even that is not
+    # real). The engine returns an empty list in that case.
+    break_even = round(be_list[0], 4) if be_list else None
+
+    return {
+        "underlying_prob": round(p, 4),
+        "strike": round(k, 4),
+        "option_type": option_type,
+        "side": side,
+        "premium": round(result["fair_price"], 5),
+        # Whether the premium is the exact model-free value (held to resolution)
+        # or the logit-normal model value, so the UI can word its note correctly.
+        "pricing_basis": result["pricing_basis"],
+        "break_even": break_even,
+        "implied_prob": round(result["implied_probability"], 4),
+        "prob_of_profit": round(result["prob_of_profit"], 5),
+        "max_gain": round(result["max_profit"], 5),
+        "max_loss": round(result["max_loss"], 5),
+        "payoff_curve": payoff_curve,
+        "greeks": {
+            "delta": round(sign * g["delta"], 5),
+            "gamma": round(sign * g["gamma"], 5),
+            "theta": round(sign * g["theta"], 5),
+            "vega": round(sign * g["vega"], 5),
+        },
+        "greek_curves": greek_curves,
+    }
 
 
 class _MockEngine:
-    def _premium_call(self, p: float, k: float) -> float:
-        vol = _SIGMA * math.sqrt(_TAU)
-        if vol <= 0:
-            return max(p - k, 0.0)
-        d = (p - k) / vol
-        return (p - k) * _norm_cdf(d) + vol * _norm_pdf(d)
-
-    def _premium(self, p: float, k: float, option_type: str) -> float:
-        call = self._premium_call(p, k)
-        if option_type == "put":
-            # put-call parity for the Bachelier model: P = C - (p - k)
-            return call - (p - k)
-        return call
+    """Engine over the real ``derivatives_engine`` -- identical math to the real
+    engine, kept as a separate class only so the offline/mock mode has an engine
+    instance to select. It carries no pricing model of its own.
+    """
 
     def bundle(
         self,
@@ -299,111 +392,11 @@ class _MockEngine:
         side: str,
         premium: float | None = None,
         tau: float = 1.0,
+        order_book: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        option_type = option_type.lower()
-        side = side.lower()
-        if option_type not in ("call", "put"):
-            raise ValueError("option_type must be 'call' or 'put'")
-        if side not in ("long", "short"):
-            raise ValueError("side must be 'long' or 'short'")
         if not (0.0 < tau <= 1.0):
             raise ValueError("tau must be in (0, 1]")
-        p = _clamp01(yes_price)
-        k = _clamp01(strike)
-        prem = premium if premium is not None else self._premium(p, k, option_type)
-        sign = 1.0 if side == "long" else -1.0
-
-        # payoff at expiry across the probability grid
-        grid = [i / 100.0 for i in range(0, 101)]
-        payoff_curve = []
-        for gp in grid:
-            if option_type == "call":
-                intrinsic = max(gp - k, 0.0)
-            else:
-                intrinsic = max(k - gp, 0.0)
-            pnl = sign * (intrinsic - prem)
-            payoff_curve.append({"p": round(gp, 3), "payoff": round(pnl, 5)})
-
-        # break-even: probability where payoff crosses zero
-        if option_type == "call":
-            be_raw = k + prem
-        else:
-            be_raw = k - prem
-        break_even = _clamp01(be_raw)
-
-        # max gain / max loss: side-signed payoff extrema over [0, 1].
-        # The payoff curve already carries the side sign, so its max/min are the
-        # scalars the UI wants (for a long option max loss is -premium, bounded).
-        payoffs = [pt["payoff"] for pt in payoff_curve]
-        max_gain = max(payoffs)
-        max_loss = min(payoffs)
-
-        # model-based probability of profit: settlement x ~ Normal(p, vol) under
-        # this mock's own Bachelier dispersion; profit is the mass on the
-        # profitable side of break-even. Long call / short put profit above
-        # break-even; long put / short call profit below it. The dispersion
-        # scales with the modeled time-to-resolution as _SIGMA * sqrt(tau), so
-        # shrinking tau tightens it (matching the real engine's tau handling).
-        settle_vol = max(_SIGMA * math.sqrt(tau), 1e-9)
-        if be_raw < 0.0 or be_raw > 1.0:
-            # premium unrecoverable within [0, 1]: long never profits, short always does
-            prob_of_profit = 0.0 if side == "long" else 1.0
-        else:
-            cdf_below = _norm_cdf((be_raw - p) / settle_vol)
-            long_profits_above = option_type == "call"
-            profits_above = long_profits_above if side == "long" else not long_profits_above
-            prob_of_profit = (1.0 - cdf_below) if profits_above else cdf_below
-
-        # Greeks via the smooth Bachelier model, evaluated at current p. The
-        # dispersion tightens with the modeled resolution horizon (sqrt(tau)),
-        # so gamma/theta/vega move as tau is scrubbed; premium stays tau-
-        # invariant here, matching the engine's fair_price.
-        vol = max(_SIGMA * math.sqrt(tau), 1e-9)
-        d = (p - k) / vol if vol > 0 else 0.0
-        delta_call = _norm_cdf(d)
-        delta = delta_call if option_type == "call" else delta_call - 1.0
-        gamma = _norm_pdf(d) / vol if vol > 0 else 0.0
-        vega = math.sqrt(tau) * _norm_pdf(d)
-        theta = -(_SIGMA * _norm_pdf(d)) / (2.0 * math.sqrt(tau)) if tau > 0 else 0.0
-
-        def _greek_at(gp: float, which: str) -> float:
-            dd = (gp - k) / vol if vol > 0 else 0.0
-            if which == "delta":
-                dc = _norm_cdf(dd)
-                val = dc if option_type == "call" else dc - 1.0
-            elif which == "gamma":
-                val = _norm_pdf(dd) / vol if vol > 0 else 0.0
-            elif which == "vega":
-                val = math.sqrt(tau) * _norm_pdf(dd)
-            else:  # theta
-                val = -(_SIGMA * _norm_pdf(dd)) / (2.0 * math.sqrt(tau)) if tau > 0 else 0.0
-            return sign * val
-
-        greek_curves = {
-            name: [{"p": round(gp, 3), "value": round(_greek_at(gp, name), 6)} for gp in grid]
-            for name in ("delta", "gamma", "theta", "vega")
-        }
-
-        return {
-            "underlying_prob": round(p, 4),
-            "strike": round(k, 4),
-            "option_type": option_type,
-            "side": side,
-            "premium": round(prem, 5),
-            "break_even": round(break_even, 4),
-            "implied_prob": round(k, 4),
-            "prob_of_profit": round(prob_of_profit, 5),
-            "max_gain": round(max_gain, 5),
-            "max_loss": round(max_loss, 5),
-            "payoff_curve": payoff_curve,
-            "greeks": {
-                "delta": round(sign * delta, 5),
-                "gamma": round(sign * gamma, 5),
-                "theta": round(sign * theta, 5),
-                "vega": round(sign * vega, 5),
-            },
-            "greek_curves": greek_curves,
-        }
+        return _build_bundle(yes_price, strike, option_type, side, tau, order_book)
 
 
 def _clamp01(x: float) -> float:
@@ -644,13 +637,13 @@ class _RealDataLayer:
 # the {p, payoff} / {p, value} shapes the UI charts consume.
 # --------------------------------------------------------------------------
 class _RealEngine:
-    """Engine over ``derivatives_engine.analyze``.
+    """Engine over ``derivatives_engine.analyze`` via the shared bundle builder.
 
-    The engine computes long-side point Greeks; a short position is the sign
-    flip of the long one, so we apply the side sign here (matching the UI's
-    expectation and the mock engine's behaviour). ``break_even`` from the
-    engine is a list (possibly empty) over [0,1]; the UI wants one scalar, so
-    we take the first crossing and clamp as a fallback.
+    Carries no pricing math of its own: it delegates to :func:`_build_bundle`,
+    the one place the bundle is shaped, so the real and mock engines cannot
+    diverge. The order book is passed through to the engine, which sets the
+    implied probability from the top-of-book mid and widens the model dispersion
+    by the half-spread (MODEL.md).
     """
 
     def bundle(
@@ -661,76 +654,9 @@ class _RealEngine:
         side: str,
         premium: float | None = None,
         tau: float = 1.0,
+        order_book: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        from derivatives_engine import analyze
-
-        option_type = option_type.lower()
-        side = side.lower()
-        if option_type not in ("call", "put"):
-            raise ValueError("option_type must be 'call' or 'put'")
-        if side not in ("long", "short"):
-            raise ValueError("side must be 'long' or 'short'")
-
-        p = _clamp01(yes_price)
-        k = _clamp01(strike)
-        result = analyze(
-            p=p,
-            strike=k,
-            option_type=option_type,
-            side=side,
-            tau=tau,
-            num_points=101,
-        )
-        sign = 1.0 if side == "long" else -1.0
-
-        # payoff_curve: engine returns parallel {x: [...], payoff: [...]} where
-        # payoff already carries the side sign (analyze passes side through).
-        pc = result["payoff_curve"]
-        payoff_curve = [
-            {"p": round(xp, 3), "payoff": round(py, 5)}
-            for xp, py in zip(pc["x"], pc["payoff"])
-        ]
-
-        # greek_curve: engine returns long-side parallel arrays; apply side sign.
-        gc = result["greek_curve"]
-        ps = gc["p"]
-        greek_curves = {
-            name: [
-                {"p": round(ps[i], 3), "value": round(sign * gc[name][i], 6)}
-                for i in range(len(ps))
-            ]
-            for name in ("delta", "gamma", "theta", "vega")
-        }
-
-        g = result["greeks"]  # long-side point Greeks
-        be_list = result["break_even"]
-        break_even = be_list[0] if be_list else _clamp01(
-            k + result["fair_price"] if option_type == "call"
-            else k - result["fair_price"]
-        )
-
-        return {
-            "underlying_prob": round(p, 4),
-            "strike": round(k, 4),
-            "option_type": option_type,
-            "side": side,
-            "premium": round(result["fair_price"], 5),
-            "break_even": round(break_even, 4),
-            "implied_prob": round(result["implied_probability"], 4),
-            # Model-based probability the position ends in profit, in [0, 1].
-            "prob_of_profit": round(result["prob_of_profit"], 5),
-            # Side-signed payoff extrema over [0, 1], in $ per $1 contract.
-            "max_gain": round(result["max_profit"], 5),
-            "max_loss": round(result["max_loss"], 5),
-            "payoff_curve": payoff_curve,
-            "greeks": {
-                "delta": round(sign * g["delta"], 5),
-                "gamma": round(sign * g["gamma"], 5),
-                "theta": round(sign * g["theta"], 5),
-                "vega": round(sign * g["vega"], 5),
-            },
-            "greek_curves": greek_curves,
-        }
+        return _build_bundle(yes_price, strike, option_type, side, tau, order_book)
 
 
 # --------------------------------------------------------------------------
