@@ -364,3 +364,243 @@ def test_reduced_motion_charts_still_draw(server, browser):
         assert external == [], f"external requests: {external}"
     finally:
         context.close()
+
+
+# ---------------------------------------------------------------------------
+# Round-8 follow-ups: pricing_basis note/badge, null break-even, provider
+# warnings and the 502 error state. These use Playwright route mocking so the
+# UI can be driven into states the deterministic mock backend never reaches
+# (a null break-even, a provider outage) without changing the API.
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+
+
+def _bundle_json(break_even, pricing_basis="model"):
+    """A minimal but complete derivative bundle, as the API would serialize it.
+
+    ``break_even`` may be a float in 0..1 or ``None`` (no crossing in range).
+    The curves are short placeholders; the UI only needs them to be present and
+    plottable. Used to drive the null-break-even path deterministically.
+    """
+    grid = [i / 10 for i in range(11)]
+    payoff_curve = [{"p": p, "payoff": round(p - 0.5, 5)} for p in grid]
+    greek_curves = {
+        name: [{"p": p, "value": 0.1} for p in grid]
+        for name in ("delta", "gamma", "theta", "vega")
+    }
+    return json.dumps({
+        "underlying_prob": 0.62,
+        "strike": 0.5,
+        "option_type": "call",
+        "side": "long",
+        "premium": 0.9,
+        "pricing_basis": pricing_basis,
+        "break_even": break_even,
+        "implied_prob": 0.62,
+        "prob_of_profit": 0.4,
+        "max_gain": 0.5,
+        "max_loss": -0.9,
+        "payoff_curve": payoff_curve,
+        "greeks": {"delta": 0.5, "gamma": 0.1, "theta": 0.1, "vega": 0.1},
+        "greek_curves": greek_curves,
+        "market": {
+            "id": "poly-btc-100k-eoy",
+            "provider": "polymarket",
+            "title": "Bitcoin above $100k at year end?",
+            "yes_price": 0.62,
+            "no_price": 0.38,
+        },
+    })
+
+
+def test_pricing_basis_note_and_badge_both_states(server, browser):
+    """The "You pay" badge and the summary note track ``pricing_basis``:
+    'exact at resolution' / model-free wording at tau = 1 (held to resolution),
+    'model estimate' / model-based wording below 1."""
+    _SELF[0] = server
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    page, console_errors, page_errors, external = _collect_page(context)
+    try:
+        page.goto(server + "/", wait_until="networkidle")
+        _select_first_market(page)
+        # Default tau = 1 -> held to resolution -> exact/model-free.
+        page.wait_for_function(
+            "() => document.querySelector('#summaryStrip .basis-badge') !== null",
+            timeout=15000,
+        )
+        badge = page.locator("#summaryStrip .basis-badge")
+        assert "exact" in badge.get_attribute("class")
+        assert "exact at resolution" in badge.inner_text().lower()
+        note = page.locator("#summaryNote").inner_text().lower()
+        assert "exact" in note and "model-free" in note
+
+        # Move to a modeled horizon -> model estimate / model-based.
+        page.eval_on_selector(
+            "#tauRange",
+            """(el) => {
+                el.value = '0.5';
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }""",
+        )
+        page.wait_for_function(
+            """() => {
+                const b = document.querySelector('#summaryStrip .basis-badge');
+                return b && b.classList.contains('model');
+            }""",
+            timeout=15000,
+        )
+        badge = page.locator("#summaryStrip .basis-badge")
+        assert "model estimate" in badge.inner_text().lower()
+        note = page.locator("#summaryNote").inner_text().lower()
+        assert "model-based" in note
+        assert console_errors == [], f"console errors: {console_errors}"
+        assert page_errors == [], f"page errors: {page_errors}"
+    finally:
+        context.close()
+
+
+def test_null_break_even_shows_none_no_marker_no_side_text(server, browser):
+    """A null break-even: the tile reads 'None', no navy break-even line is
+    drawn on the payoff chart, and the what-if readout says nothing about being
+    above/below a break-even."""
+    _SELF[0] = server
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    page, console_errors, page_errors, external = _collect_page(context)
+    # Force every derivative request to a bundle with break_even = null.
+    page.route(
+        "**/api/derivative/**",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=_bundle_json(None),
+        ),
+    )
+    try:
+        page.goto(server + "/", wait_until="networkidle")
+        _select_first_market(page)
+        page.wait_for_timeout(600)
+
+        # the Break-even tile reads "None", not a coerced percentage
+        strip = page.locator("#summaryStrip").inner_text()
+        assert "None" in strip, f"break-even tile not 'None': {strip!r}"
+
+        # no navy (#1b2a52) break-even line drawn on the payoff canvas
+        navy = _count_pixels_near(page, "payoffChart", (0x1b, 0x2a, 0x52))
+        assert navy == 0, f"break-even line drawn despite null break-even ({navy}px)"
+
+        # the what-if readout mentions neither "above" nor "below" a break-even
+        page.eval_on_selector(
+            "#probScrub",
+            """(el) => {
+                el.value = '0.8';
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+            }""",
+        )
+        readout = page.locator("#probScrubReadout").inner_text().lower()
+        assert "above" not in readout and "below" not in readout, \
+            f"what-if text names a break-even side with null break-even: {readout!r}"
+        assert "break-even" not in readout, f"readout names break-even: {readout!r}"
+        assert console_errors == [], f"console errors: {console_errors}"
+        assert page_errors == [], f"page errors: {page_errors}"
+    finally:
+        context.close()
+
+
+def test_provider_warning_notice_shown(server, browser):
+    """A partial provider outage (markets returned plus a ``warnings`` array)
+    shows the compact notice above the market list, naming the down provider."""
+    _SELF[0] = server
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    page, console_errors, page_errors, external = _collect_page(context)
+    warn_body = json.dumps({
+        "markets": [{
+            "id": "poly-btc-100k-eoy", "provider": "polymarket",
+            "title": "Bitcoin above $100k at year end?", "yes_price": 0.62,
+            "no_price": 0.38, "volume": 1000.0, "close_time": None,
+            "category": "Crypto",
+        }],
+        "count": 1,
+        "warnings": [{"provider": "kalshi", "message": "kalshi is temporarily unavailable (ReadTimeout)."}],
+    })
+    page.route(
+        "**/api/markets**",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json", body=warn_body),
+    )
+    try:
+        page.goto(server + "/", wait_until="networkidle")
+        page.wait_for_selector("#marketNotice:not([hidden])", timeout=15000)
+        notice = page.locator("#marketNotice")
+        assert "warn" in notice.get_attribute("class")
+        text = notice.inner_text()
+        assert "Kalshi" in text and "unavailable" in text.lower()
+        assert "Polymarket only" in text
+        # markets still render alongside the warning
+        assert page.locator(".market-item").count() >= 1
+        assert console_errors == [], f"console errors: {console_errors}"
+        assert page_errors == [], f"page errors: {page_errors}"
+    finally:
+        context.close()
+
+
+def test_total_outage_502_shows_error_state_with_retry(server, browser):
+    """A 502 (all providers down) shows a distinct error state with a Retry
+    button — not the plain 'No markets match' empty placeholder. A successful,
+    warning-free retry clears the notice."""
+    _SELF[0] = server
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    page, console_errors, page_errors, external = _collect_page(context)
+
+    calls = {"n": 0}
+
+    def _route(route):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            route.fulfill(
+                status=502,
+                content_type="application/json",
+                body=json.dumps({"detail": {
+                    "message": "all market-data providers are currently unavailable",
+                    "warnings": [],
+                }}),
+            )
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "markets": [{
+                        "id": "poly-btc-100k-eoy", "provider": "polymarket",
+                        "title": "Bitcoin above $100k at year end?",
+                        "yes_price": 0.62, "no_price": 0.38, "volume": 1000.0,
+                        "close_time": None, "category": "Crypto",
+                    }],
+                    "count": 1,
+                }),
+            )
+
+    page.route("**/api/markets**", _route)
+    try:
+        page.goto(server + "/", wait_until="networkidle")
+        page.wait_for_selector("#marketNotice.error", timeout=15000)
+        notice = page.locator("#marketNotice")
+        assert "Couldn't load markets" in notice.inner_text()
+        # the error state is distinct from the empty "No markets match"
+        assert "No markets match" not in page.locator("#marketList").inner_text()
+        retry = page.locator("#marketRetry")
+        assert retry.count() == 1, "no retry affordance in the error state"
+
+        # a successful, warning-free retry clears the notice and shows markets
+        retry.click()
+        page.wait_for_function(
+            "() => document.getElementById('marketNotice').hidden === true",
+            timeout=15000,
+        )
+        assert page.locator(".market-item").count() >= 1
+        # A 502 is logged by the browser as a failed-resource console message;
+        # that is expected here (it is the state under test). Only assert there
+        # is no *uncaught* page error — the error was handled into the notice.
+        assert page_errors == [], f"page errors: {page_errors}"
+    finally:
+        context.close()

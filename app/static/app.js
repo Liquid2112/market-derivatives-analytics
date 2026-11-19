@@ -73,8 +73,14 @@ async function api(path, signal) {
   const r = await fetch(path, signal ? { signal } : undefined);
   if (!r.ok) {
     let detail = r.statusText;
-    try { detail = (await r.json()).detail || detail; } catch (_) {}
-    throw new Error(detail);
+    try {
+      const body = (await r.json()).detail;
+      // A 502 outage body is `{message, warnings}`; a plain error is a string.
+      detail = (body && typeof body === "object" ? body.message : body) || detail;
+    } catch (_) {}
+    const err = new Error(detail);
+    err.status = r.status;
+    throw err;
   }
   return r.json();
 }
@@ -121,11 +127,54 @@ async function loadMarkets() {
   try {
     const data = await api("/api/markets?" + params.toString(), freshSignal("markets"));
     state.markets = data.markets;
+    // A partial outage returns results plus a `warnings` array (one provider
+    // failed, the other answered). Surface it; clear it on the next clean load.
+    renderMarketNotice(data.warnings || []);
     renderMarketList();
   } catch (e) {
     if (isAbort(e)) return;  // superseded by a newer search; ignore silently
-    el("marketList").innerHTML = `<li class="placeholder">Error: ${escapeHtml(e.message)}</li>`;
+    // A 502 (total provider outage) or a network failure is an error state,
+    // not "no markets match": show it distinctly, with a retry affordance.
+    renderMarketError(e);
   }
+}
+
+/* Compact notice above the market list. A partial outage (one provider down,
+   the other up) shows a warning here; a total failure shows an error with a
+   Retry button. Cleared on the next successful, warning-free search. */
+function renderMarketNotice(warnings) {
+  const box = el("marketNotice");
+  if (!warnings || !warnings.length) {
+    box.hidden = true;
+    box.textContent = "";
+    box.className = "market-notice";
+    return;
+  }
+  const names = { polymarket: "Polymarket", kalshi: "Kalshi" };
+  const down = warnings.map((w) => names[w.provider] || w.provider);
+  const up = ["polymarket", "kalshi"].filter((p) => !warnings.some((w) => w.provider === p));
+  const upName = up.length ? (names[up[0]] || up[0]) : "the other provider";
+  const msg = escapeHtml(warnings[0].message || "temporarily unavailable");
+  box.className = "market-notice warn";
+  box.innerHTML =
+    `<span class="mn-text">${escapeHtml(down.join(" and "))} is unavailable right now: ${msg} ` +
+    `Showing ${escapeHtml(upName)} only.</span>`;
+  box.hidden = false;
+}
+
+function renderMarketError(e) {
+  const box = el("marketNotice");
+  box.className = "market-notice error";
+  const msg = escapeHtml(e.message || "could not load markets");
+  box.innerHTML =
+    `<span class="mn-text"><strong>Couldn't load markets.</strong> ${msg}</span>` +
+    `<button type="button" class="mn-retry" id="marketRetry">Retry</button>`;
+  box.hidden = false;
+  el("marketRetry").addEventListener("click", loadMarkets);
+  // The list itself is cleared so a stale "No markets match" never sits under
+  // the error; the notice above carries the message and the retry.
+  state.markets = [];
+  el("marketList").innerHTML = "";
 }
 
 function renderMarketList() {
@@ -269,26 +318,53 @@ const fmtMoney = (x) => {
   return (v < 0 ? "−$" : "$") + mag;
 };
 
+/* Whether the premium is the exact scaled-binary value (held to resolution,
+   tau = 1, where call = p*(1-K) and put = (1-p)*K exactly) or the logit-normal
+   model value for a sub-resolution expiry (MODEL.md). The badge and the note
+   must reflect this: only "held_to_resolution" is exact/model-free. */
+const basisIsExact = (b) => b.pricing_basis === "held_to_resolution";
+
 function renderSummaryStrip(b) {
   // Use the API's own side-signed scalars, not a re-derivation.
   // 'You pay' and 'Chance of profit' are the headline numbers (hero tiles).
-  const tile = (label, val, cls, sub, hero) =>
+  const tile = (label, val, cls, sub, hero, extra) =>
     `<div class="sum-tile${hero ? " hero" : ""}">
-       <div class="sum-label">${label}</div>
+       <div class="sum-label">${label}${extra || ""}</div>
        <div class="sum-val ${cls || ""}">${val}</div>
        ${sub ? `<div class="sum-sub">${sub}</div>` : ""}
      </div>`;
 
+  const exact = basisIsExact(b);
+  // Small badge next to "You pay": says whether the premium is exact or a
+  // model estimate, matching pricing_basis.
+  const payBadge = exact
+    ? `<span class="basis-badge exact" title="Exact scaled-binary value: call = p·(1−K), put = (1−p)·K">exact at resolution</span>`
+    : `<span class="basis-badge model" title="Logit-normal model value for an expiry before resolution (MODEL.md)">model estimate</span>`;
+
+  // Break-even can be null when no break-even falls inside 0..1 (the premium
+  // pushes K ± premium out of range). Show "None" with the reason, not a
+  // coerced percentage.
+  const beNull = b.break_even == null;
+  const beVal = beNull ? "None" : fmtPct(b.break_even);
+  const beSub = beNull ? "no crossing in 0–100%" : "YES probability";
+
   el("summaryStrip").innerHTML =
-    tile("You pay", fmtMoney(b.premium), "accent", "premium, per $1 contract", true) +
+    tile("You pay", fmtMoney(b.premium), "accent", "premium, per $1 contract", true, " " + payBadge) +
     tile("Chance of profit", fmtPct(b.prob_of_profit), "", "model-based", true) +
     tile("Max you'd make", fmtMoney(b.max_gain), "pos", "per $1 contract") +
     tile("Max you'd lose", fmtMoney(b.max_loss), b.max_loss < 0 ? "neg" : "", "per $1 contract") +
-    tile("Break-even", fmtPct(b.break_even), "", "YES probability");
+    tile("Break-even", beVal, "", beSub);
 
-  el("summaryNote").textContent =
-    "“You pay”, “max make” and “max lose” are exact from the payoff — model-free. " +
-    "“Chance of profit” is model-based (Bachelier), so treat it as a modeled estimate, not odds.";
+  // The "You pay / max make / max lose are exact" claim holds only when the
+  // premium is held-to-resolution. Before resolution the premium is the
+  // logit-normal model value, so word the note to match pricing_basis.
+  el("summaryNote").textContent = exact
+    ? "At resolution these are exact: “You pay”, “max make” and “max lose” are the " +
+      "model-free scaled-binary values (call = p·(1−K), put = (1−p)·K). " +
+      "“Chance of profit” is a modeled estimate, not odds."
+    : "Before resolution these are model-based: “You pay”, “max make”, “max lose” and " +
+      "“Chance of profit” come from the bounded logit-normal model (MODEL.md), " +
+      "so treat them as modeled estimates, not odds.";
 }
 
 /* ---------- Chart.js global styling (Inter, muted grid, no borders) ---------- */
@@ -413,7 +489,7 @@ const payoffGuides = {
   id: "payoffGuides",
   afterDatasetsDraw(chart, _args, opts) {
     const g = opts;
-    if (!g || g.breakEven == null) return;
+    if (!g) return;
     const { ctx, chartArea: area, scales } = chart;
     const xAt = (p) => scales.x.getPixelForValue(Math.round(p * 100));
     const yAt = (v) => scales.y.getPixelForValue(v);
@@ -495,11 +571,17 @@ function renderProbScrub() {
   // nearest payoff sample on the 0..1 grid
   const pt = b.payoff_curve.reduce((best, d) =>
     Math.abs(d.p - p) < Math.abs(best.p - p) ? d : best, b.payoff_curve[0]);
-  const side = p >= b.break_even ? "above" : "below";
+  // Break-even can be null (no crossing inside 0..1). Guard it: `p >= null`
+  // coerces to `p >= 0` (always true) and would wrongly claim "above your
+  // break-even", so say nothing about above/below when there is no break-even.
+  const beText =
+    b.break_even == null
+      ? ""
+      : ` (${p >= b.break_even ? "above" : "below"} your ${fmtPct(b.break_even)} break-even)`;
   el("probScrubReadout").innerHTML =
     `If it settles around <b>${fmtPct(p)}</b> YES: payoff ` +
-    `<b class="${pt.payoff >= 0 ? "pos" : "neg"}">${fmtMoney(pt.payoff)}</b> per $1 contract ` +
-    `(${side} your ${fmtPct(b.break_even)} break-even).`;
+    `<b class="${pt.payoff >= 0 ? "pos" : "neg"}">${fmtMoney(pt.payoff)}</b> per $1 contract` +
+    `${beText}.`;
 }
 
 /* ---------- utils ---------- */
