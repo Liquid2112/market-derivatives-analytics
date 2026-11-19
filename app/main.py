@@ -126,6 +126,7 @@ def get_derivative(
         option_type=option_type,
         side=side,
         tau=float(tau),
+        order_book=market.get("order_book"),
     )
     bundle["market"] = {
         "id": market["id"],
