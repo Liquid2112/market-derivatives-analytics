@@ -46,6 +46,9 @@
           <button class="prov" data-provider="kalshi">Kalshi</button>
         </div>
       </div>
+      <!-- provider-outage / error notice; empty & hidden until a search
+           reports a warning or fails (audit: surface warnings and a 502). -->
+      <div id="marketNotice" class="market-notice" role="status" hidden></div>
       <ul id="marketList" class="market-list" aria-live="polite"></ul>
     </aside>
 
@@ -149,9 +152,10 @@
               <span class="greek-scalars" id="greekScalars"></span>
             </div>
             <p class="greeks-caption">
-              How the modeled value reacts to the inputs. These come from the Bachelier
-              model, not from quotes — vega and theta especially are analogies, since
-              “how unresolved” and “time to resolution” here are modeled, not listed.
+              How the modeled value reacts to the inputs. These come from the bounded
+              logit-normal model, not from quotes — vega and theta especially are
+              analogies, since “how unresolved” and “time to resolution” here are
+              modeled, not listed.
             </p>
             <div class="greek-grid">
               <div class="greek-cell">
